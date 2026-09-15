@@ -77,13 +77,20 @@ $("#lockBtn").onclick=async()=>{pendingSecret="";activeMediaId="";Native?.setSec
 $("#importBtn").onclick=async()=>{
   Native=await waitForNative();
   if(!Native){ alert("Private storage is not ready. Please close and reopen NYX."); return; }
+  $("#pickerChoiceModal").classList.add("show");
+};
+async function choosePicker(source){
+  $("#pickerChoiceModal").classList.remove("show");
   try{
-    const r=await Native.pickMedia();
+    await Native.pickMedia({source});
     await renderVault();
   }catch(e){
     if(e?.message && !/cancel/i.test(e.message)) alert(e.message);
   }
-};
+}
+$("#pickPhotos").onclick=()=>choosePicker("photos");
+$("#pickFiles").onclick=()=>choosePicker("files");
+$("#closePickerChoice").onclick=()=>$("#pickerChoiceModal").classList.remove("show");
 $("#vaultGrid").addEventListener("click",e=>{const b=e.target.closest(".media");if(b)openMediaModal(b.dataset.id)});$("#closeMedia").onclick=closeMedia;$("#deleteMediaBtn").onclick=deleteActiveMedia;$("#openMediaBtn").onclick=()=>activeMediaId&&Native.openMedia({id:activeMediaId}).catch(()=>{$("#mediaMsg").textContent="Could not open media."});
 $("#privateSettingsBtn").onclick=async()=>{show("#privateSettingsView");await loadPrivateSettings()};$("#privateBackBtn").onclick=()=>show("#vaultView");$("#savePrivateSettings").onclick=async()=>{try{await Native.setPrivateSettings({biometricEnabled:$("#bioToggle").checked,removeOriginal:$("#removeOriginalToggle").checked});$("#privateMsg").textContent="Private settings saved."}catch{$("#privateMsg").textContent="Could not save settings."}};
 $("#changeCredentialBtn").onclick=()=>{$("#credentialModal").classList.add("show");$("#credentialMsg").textContent=""};$("#closeCredential").onclick=()=>$("#credentialModal").classList.remove("show");$("#saveCredential").onclick=async()=>{const oldSecret=$("#oldSecret").value.trim(),oldPin=$("#oldPin").value.trim(),newSecret=$("#newSecret").value.trim(),newPin=$("#newPin").value.trim();if(!oldSecret||!/^[0-9]{6}$/.test(oldPin)||!newSecret||!/^[0-9]{6}$/.test(newPin)){$("#credentialMsg").textContent="Use a secret and two valid 6-digit PINs.";return}try{await Native.changeCredential({oldSecret,oldPin,newSecret,newPin});pendingSecret="";$("#credentialModal").classList.remove("show");$("#privateMsg").textContent="Access details updated."}catch(e){$("#credentialMsg").textContent=e?.message||"Could not update access details."}};

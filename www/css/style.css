@@ -4,3 +4,5 @@
 /* Make the title field unmistakable for the secret trigger without exposing the vault UI. */
 .secret-trigger-title{font-weight:600;letter-spacing:.01em;}
 .secret-trigger-title::placeholder{opacity:.75;}
+
+.choice-grid button small{display:block;margin-top:5px;color:#666;font-weight:400;line-height:1.4}

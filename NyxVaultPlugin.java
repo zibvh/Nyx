@@ -5,6 +5,7 @@ import android.content.Intent;
 import android.net.Uri;
 import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
+import android.provider.MediaStore;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.media.MediaMetadataRetriever;
@@ -204,19 +205,34 @@ public class NyxVaultPlugin extends Plugin {
     @PluginMethod
     public void pickMedia(PluginCall call) {
         pendingPick = call;
-        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-        i.setType("*/*");
-        i.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"image/*", "video/*"});
-        i.addCategory(Intent.CATEGORY_OPENABLE);
-        i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
-        i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
-        getActivity().startActivityForResult(i, PICK_CODE);
+        String source = call.getString("source", "files");
+        Intent i;
+        int requestCode;
+
+        if ("photos".equals(source) && Build.VERSION.SDK_INT >= 33) {
+            // Android Photo Picker: images + videos only.
+            i = new Intent(MediaStore.ACTION_PICK_IMAGES);
+            i.setType("*/*");
+            i.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"image/*", "video/*"});
+            i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+            requestCode = PICK_CODE + 1;
+        } else {
+            // Android Files/document picker: restrict accepted results to image/video.
+            i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            i.setType("*/*");
+            i.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"image/*", "video/*"});
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+            i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+            requestCode = PICK_CODE;
+        }
+        getActivity().startActivityForResult(i, requestCode);
     }
 
     @Override
     protected void handleOnActivityResult(int requestCode, int resultCode, Intent data) {
         super.handleOnActivityResult(requestCode, resultCode, data);
-        if (requestCode != PICK_CODE || pendingPick == null) return;
+        if ((requestCode != PICK_CODE && requestCode != PICK_CODE + 1) || pendingPick == null) return;
         try {
             if (resultCode != android.app.Activity.RESULT_OK || data == null) { pendingPick.reject("Cancelled"); pendingPick = null; return; }
             ArrayList<Uri> uris = new ArrayList<>();
@@ -224,7 +240,12 @@ public class NyxVaultPlugin extends Plugin {
             else if (data.getData() != null) uris.add(data.getData());
             int ok = 0;
             for (Uri u : uris) {
-                try { if (Build.VERSION.SDK_INT >= 19) { try { getContext().getContentResolver().takePersistableUriPermission(u, Intent.FLAG_GRANT_READ_URI_PERMISSION); } catch (Exception ignoredPermission) {} } saveUri(u); ok++; } catch (Exception ignored) {}
+                try {
+                    String pickedMime = getContext().getContentResolver().getType(u);
+                    if (pickedMime == null || !(pickedMime.startsWith("image/") || pickedMime.startsWith("video/"))) continue;
+                    if (Build.VERSION.SDK_INT >= 19 && requestCode == PICK_CODE) { try { getContext().getContentResolver().takePersistableUriPermission(u, Intent.FLAG_GRANT_READ_URI_PERMISSION); } catch (Exception ignoredPermission) {} }
+                    saveUri(u); ok++;
+                } catch (Exception ignored) {}
             }
             scheduleUploadWorker();
             JSObject ret = new JSObject(); ret.put("imported", ok); pendingPick.resolve(ret); pendingPick = null;
