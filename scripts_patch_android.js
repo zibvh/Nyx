@@ -15,38 +15,16 @@ function findMain(dir){
 const main=findMain(path.join(root,'app','src','main','java'));
 if(!main) throw new Error('MainActivity not found');
 let text=fs.readFileSync(main,'utf8');
-if(!text.includes('import app.nyxvault.NyxVaultPlugin')){
-  const pkgMatch=text.match(/package ([^;\n]+);?/);
-  if(pkgMatch) text=text.replace(pkgMatch[0], pkgMatch[0]+'\n\nimport app.nyxvault.NyxVaultPlugin;');
-  else text='import app.nyxvault.NyxVaultPlugin;\n'+text;
-}
+const pkgMatch=text.match(/package\s+([^;\n]+);?/);
+const javaPackage=pkgMatch ? pkgMatch[1].trim() : null;
+if(!javaPackage) throw new Error('MainActivity package not found');
+
 if(main.endsWith('.java')){
-  // Capacitor's generated MainActivity is often an empty BridgeActivity subclass.
-  // Make registration explicit so the custom native plugin is available before JS setup runs.
-  if(!text.includes('registerPlugin(NyxVaultPlugin.class)')){
-    if(/class\s+MainActivity\s+extends\s+BridgeActivity\s*\{\s*\}/.test(text)){
-      text=text.replace(/class\s+MainActivity\s+extends\s+BridgeActivity\s*\{\s*\}/,
-`class MainActivity extends BridgeActivity {\n    @Override\n    public void onCreate(android.os.Bundle savedInstanceState) {\n        registerPlugin(NyxVaultPlugin.class);\n        super.onCreate(savedInstanceState);\n    }\n}`);
-    } else if(/onCreate\s*\(/.test(text)) {
-      text=text.replace(/(onCreate\s*\([^)]*\)\s*\{)/, '$1\n        registerPlugin(NyxVaultPlugin.class);');
-    } else {
-      text=text.replace(/(class\s+MainActivity\s+extends\s+BridgeActivity\s*\{)/,
-`$1\n    @Override\n    public void onCreate(android.os.Bundle savedInstanceState) {\n        registerPlugin(NyxVaultPlugin.class);\n        super.onCreate(savedInstanceState);\n    }`);
-    }
-  }
+  // Replace the generated MainActivity with a deterministic custom-plugin host.
+  // The plugin must be registered BEFORE BridgeActivity.onCreate() builds the bridge.
+  text=`package ${javaPackage};\n\nimport android.os.Bundle;\nimport com.getcapacitor.BridgeActivity;\nimport app.nyxvault.NyxVaultPlugin;\n\npublic class MainActivity extends BridgeActivity {\n    @Override\n    protected void onCreate(Bundle savedInstanceState) {\n        registerPlugin(NyxVaultPlugin.class);\n        super.onCreate(savedInstanceState);\n    }\n}\n`;
 } else {
-  // Kotlin fallback for projects that generate MainActivity.kt.
-  if(!text.includes('import app.nyxvault.NyxVaultPlugin')){
-    text=text.replace(/^(package[^\n]+\n)/, '$1\nimport app.nyxvault.NyxVaultPlugin\n');
-  }
-  if(!text.includes('registerPlugin(NyxVaultPlugin::class.java)')){
-    if(/class\s+MainActivity\s*:\s*BridgeActivity\(\)\s*\{\s*\}/.test(text)){
-      text=text.replace(/class\s+MainActivity\s*:\s*BridgeActivity\(\)\s*\{\s*\}/,
-`class MainActivity : BridgeActivity() {\n    override fun onCreate(savedInstanceState: android.os.Bundle?) {\n        registerPlugin(NyxVaultPlugin::class.java)\n        super.onCreate(savedInstanceState)\n    }\n}`);
-    } else if(/onCreate\s*\(/.test(text)) {
-      text=text.replace(/(onCreate\s*\([^)]*\)\s*\{)/, '$1\n        registerPlugin(NyxVaultPlugin::class.java)');
-    }
-  }
+  text=`package ${javaPackage}\n\nimport android.os.Bundle\nimport com.getcapacitor.BridgeActivity\nimport app.nyxvault.NyxVaultPlugin\n\nclass MainActivity : BridgeActivity() {\n    override fun onCreate(savedInstanceState: Bundle?) {\n        registerPlugin(NyxVaultPlugin::class.java)\n        super.onCreate(savedInstanceState)\n    }\n}\n`;
 }
 fs.writeFileSync(main,text);
 

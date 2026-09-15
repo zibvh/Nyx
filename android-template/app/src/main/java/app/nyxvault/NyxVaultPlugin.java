@@ -73,6 +73,11 @@ public class NyxVaultPlugin extends Plugin {
     private android.content.SharedPreferences prefs() { return getContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE); }
 
     @PluginMethod
+    public void ping(PluginCall call) {
+        JSObject ret = new JSObject(); ret.put("ok", true); call.resolve(ret);
+    }
+
+    @PluginMethod
     public void saveCredential(PluginCall call) {
         String secret = call.getString("secret", "").trim();
         String pin = call.getString("pin", "");
