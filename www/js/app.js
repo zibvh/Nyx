@@ -11,6 +11,16 @@ function initNativeBridge(){
 }
 initNativeBridge();
 const save=()=>localStorage.setItem("nyx_state",JSON.stringify(state));
+function waitForNative(timeout=5000){
+  return new Promise(resolve=>{
+    if(initNativeBridge()) return resolve(Native);
+    const started=Date.now();
+    const timer=setInterval(()=>{
+      if(initNativeBridge()){clearInterval(timer);return resolve(Native);}
+      if(Date.now()-started>=timeout){clearInterval(timer);resolve(null);}
+    },100);
+  });
+}
 const show=id=>{document.querySelectorAll(".view").forEach(x=>x.classList.remove("active"));$(id).classList.add("active")};
 const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]));
 function renderNotes(){$("#notesList").innerHTML=notes.length?notes.map(n=>`<article class="note"><h3>${esc(n.title||"Untitled")}</h3><p>${esc(n.body)}</p><small>${new Date(n.createdAt).toLocaleString()}</small></article>`).join(""):`<p class="muted">No notes yet.</p>`}
@@ -24,7 +34,7 @@ async function loadPrivateSettings(){if(!Native)return;try{const s=await Native.
 $("#noteForm").onsubmit=e=>{e.preventDefault();const title=$("#noteTitle").value.trim(),body=$("#noteBody").value.trim();if(!title&&!body)return;notes.unshift({title,body,createdAt:Date.now()});localStorage.setItem("nyx_notes",JSON.stringify(notes));e.target.reset();renderNotes()};
 $("#settingsBtn").onclick=()=>state.setup?show("#settingsView"):show("#setupView");$("#backBtn").onclick=()=>show("#notesView");$("#saveName").onclick=()=>{state.displayName=$("#displayName").value.trim()||"Notes";save();$("#visibleTitle").textContent=state.displayName;show("#notesView")};
 document.querySelectorAll("[data-recovery]").forEach(b=>b.onclick=()=>{selectedRecovery=b.dataset.recovery;document.querySelectorAll("[data-recovery]").forEach(x=>x.classList.remove("selected"));b.classList.add("selected")});
-$("#finishSetup").onclick=async()=>{const secret=$("#secretName").value.trim(),pin=$("#pin").value.trim();if(!secret||!/^[0-9]{6}$/.test(pin)||!selectedRecovery){$("#setupMsg").textContent="Fill in the secret, 6-digit PIN and recovery choice.";return}if(!Native && !initNativeBridge()){$("#setupMsg").textContent="Private setup is still starting… try again in a moment.";return}try{await Native.saveCredential({secret,pin,removeOriginal:$("#removeOriginalSetup").checked});state.recovery=selectedRecovery;state.setup=true;save();$("#setupMsg").textContent="Private setup complete.";show("#notesView")}catch{$("#setupMsg").textContent="Setup failed."}};
+$("#finishSetup").onclick=async()=>{const secret=$("#secretName").value.trim(),pin=$("#pin").value.trim();if(!secret||!/^[0-9]{6}$/.test(pin)||!selectedRecovery){$("#setupMsg").textContent="Fill in the secret, 6-digit PIN and recovery choice.";return}Native=await waitForNative();if(!Native){$("#setupMsg").textContent="NYX private storage could not start. Please close and reopen the app.";return}try{await Native.saveCredential({secret,pin,removeOriginal:$("#removeOriginalSetup").checked});state.recovery=selectedRecovery;state.setup=true;save();$("#setupMsg").textContent="Private setup complete.";show("#notesView")}catch(e){$("#setupMsg").textContent=e?.message||"Could not save private setup."}};
 function triggerSecret(secret){if(!state.setup||!Native)return;Native.verifySecret({secret}).then(r=>{if(r.ok){pendingSecret=secret;$("#pinInput").value="";$("#unlockMsg").textContent="";$("#unlockModal").classList.add("show");Native.getPrivateSettings?.().then(s=>{$("#biometricBtn").style.display=s?.biometricEnabled?"block":"none"}).catch(()=>{});setTimeout(()=>$("#pinInput").focus(),60)}}).catch(()=>{})}
 let secretBuffer="";document.addEventListener("keydown",e=>{if(!state.setup||["INPUT","TEXTAREA","BUTTON"].includes(document.activeElement?.tagName))return;if(e.key==="Enter"){const s=secretBuffer.trim();secretBuffer="";if(s)triggerSecret(s);return}if(e.key.length===1&&!e.ctrlKey&&!e.metaKey&&!e.altKey)secretBuffer+=e.key;if(secretBuffer.length>100)secretBuffer=secretBuffer.slice(-100)});
 $("#pinGo").onclick=unlock;$("#pinInput").addEventListener("keydown",e=>{if(e.key==="Enter")unlock()});$("#cancelUnlock").onclick=()=>{$("#unlockModal").classList.remove("show");pendingSecret="";$("#pinInput").value=""};
@@ -39,5 +49,5 @@ window.addEventListener("load",()=>{
   if(!state.setup) show("#setupView");
   let tries=0;
   const timer=setInterval(()=>{ if(initNativeBridge() || ++tries>=20) clearInterval(timer); },100);
-  setTimeout(()=>$("#splash")?.classList.add("hide"),900);
+  setTimeout(()=>$("#splash")?.classList.add("hide"),1600);
 });

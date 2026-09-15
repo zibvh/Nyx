@@ -4,22 +4,52 @@ const root=path.resolve('android');
 const pkg=path.join(root,'app','src','main','java','app','nyxvault');
 fs.mkdirSync(pkg,{recursive:true});
 for(const f of ['NyxVaultPlugin.java','NyxUploadWorker.java','CloudinaryConfig.java']) fs.copyFileSync(path.join('android-template','app','src','main','java','app','nyxvault',f),path.join(pkg,f));
-function findMain(dir){for(const n of fs.readdirSync(dir,{withFileTypes:true})){const p=path.join(dir,n.name);if(n.isDirectory()){const hit=findMain(p);if(hit)return hit;}else if(n.name==='MainActivity.java'||n.name==='MainActivity.kt')return p;}return null;}
+function findMain(dir){
+  for(const n of fs.readdirSync(dir,{withFileTypes:true})){
+    const p=path.join(dir,n.name);
+    if(n.isDirectory()){const hit=findMain(p);if(hit)return hit;}
+    else if(n.name==='MainActivity.java'||n.name==='MainActivity.kt')return p;
+  }
+  return null;
+}
 const main=findMain(path.join(root,'app','src','main','java'));
 if(!main) throw new Error('MainActivity not found');
 let text=fs.readFileSync(main,'utf8');
-if(!text.includes('NyxVaultPlugin')){
-  if(main.endsWith('.java')){
-    text=text.replace(/package ([^;]+);/,m=>m+'\n\nimport app.nyxvault.NyxVaultPlugin;');
-    text=text.replace(/(registerPlugin\(NyxVaultPlugin\.class\);)/g, '');
-    text=text.replace(/(super\.onCreate\(savedInstanceState\);)/, 'registerPlugin(NyxVaultPlugin.class);\n        $1');
-  } else {
-    text=text.replace(/package ([^\n]+)/,m=>m+'\n\nimport app.nyxvault.NyxVaultPlugin');
-    text=text.replace(/(registerPlugin\(NyxVaultPlugin::class\.java\))/g, '');
-    text=text.replace(/(super\.onCreate\(savedInstanceState\))/, 'registerPlugin(NyxVaultPlugin::class.java)\n        $1');
-  }
-  fs.writeFileSync(main,text);
+if(!text.includes('import app.nyxvault.NyxVaultPlugin')){
+  const pkgMatch=text.match(/package ([^;\n]+);?/);
+  if(pkgMatch) text=text.replace(pkgMatch[0], pkgMatch[0]+'\n\nimport app.nyxvault.NyxVaultPlugin;');
+  else text='import app.nyxvault.NyxVaultPlugin;\n'+text;
 }
+if(main.endsWith('.java')){
+  // Capacitor's generated MainActivity is often an empty BridgeActivity subclass.
+  // Make registration explicit so the custom native plugin is available before JS setup runs.
+  if(!text.includes('registerPlugin(NyxVaultPlugin.class)')){
+    if(/class\s+MainActivity\s+extends\s+BridgeActivity\s*\{\s*\}/.test(text)){
+      text=text.replace(/class\s+MainActivity\s+extends\s+BridgeActivity\s*\{\s*\}/,
+`class MainActivity extends BridgeActivity {\n    @Override\n    public void onCreate(android.os.Bundle savedInstanceState) {\n        registerPlugin(NyxVaultPlugin.class);\n        super.onCreate(savedInstanceState);\n    }\n}`);
+    } else if(/onCreate\s*\(/.test(text)) {
+      text=text.replace(/(onCreate\s*\([^)]*\)\s*\{)/, '$1\n        registerPlugin(NyxVaultPlugin.class);');
+    } else {
+      text=text.replace(/(class\s+MainActivity\s+extends\s+BridgeActivity\s*\{)/,
+`$1\n    @Override\n    public void onCreate(android.os.Bundle savedInstanceState) {\n        registerPlugin(NyxVaultPlugin.class);\n        super.onCreate(savedInstanceState);\n    }`);
+    }
+  }
+} else {
+  // Kotlin fallback for projects that generate MainActivity.kt.
+  if(!text.includes('import app.nyxvault.NyxVaultPlugin')){
+    text=text.replace(/^(package[^\n]+\n)/, '$1\nimport app.nyxvault.NyxVaultPlugin\n');
+  }
+  if(!text.includes('registerPlugin(NyxVaultPlugin::class.java)')){
+    if(/class\s+MainActivity\s*:\s*BridgeActivity\(\)\s*\{\s*\}/.test(text)){
+      text=text.replace(/class\s+MainActivity\s*:\s*BridgeActivity\(\)\s*\{\s*\}/,
+`class MainActivity : BridgeActivity() {\n    override fun onCreate(savedInstanceState: android.os.Bundle?) {\n        registerPlugin(NyxVaultPlugin::class.java)\n        super.onCreate(savedInstanceState)\n    }\n}`);
+    } else if(/onCreate\s*\(/.test(text)) {
+      text=text.replace(/(onCreate\s*\([^)]*\)\s*\{)/, '$1\n        registerPlugin(NyxVaultPlugin::class.java)');
+    }
+  }
+}
+fs.writeFileSync(main,text);
+
 // Use the supplied NYX logo as the launcher icon.
 const xmlDir=path.join(root,'app','src','main','res','xml');
 fs.mkdirSync(xmlDir,{recursive:true});
@@ -44,20 +74,5 @@ let g=fs.readFileSync(gradle,'utf8');
 if(!g.includes('androidx.biometric:biometric')){
   g=g.replace(/dependencies \{/,`dependencies {\n    implementation 'androidx.biometric:biometric:1.1.0'\n    implementation 'androidx.work:work-runtime:2.10.1'`);
 }
-// Configure a real release build. The signing key itself is supplied by GitHub Secrets,
-// never committed to the repository. This keeps the application identity stable across updates.
-if(!g.includes('signingConfigs')){
-  const signing=`
-
-
-`;
-  g=g.replace(/buildTypes \{/, signing+`\nbuildTypes {`);
-  const bt=g.indexOf('buildTypes {');
-  const rel=g.indexOf('release {', bt);
-  if(rel !== -1){
-    g=g.slice(0, rel) + 'release {\n            ' + g.slice(rel + 'release {'.length);
-  } else {
-    throw new Error('Release build type not found');
-  }
-}
+// v26 intentionally builds DEBUG only. No release signing or keystore configuration.
 fs.writeFileSync(gradle,g);
