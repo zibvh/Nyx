@@ -1,0 +1,2 @@
+// Register in MainActivity.onCreate():
+add(NyxVaultPlugin.class);
