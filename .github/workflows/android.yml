@@ -21,7 +21,8 @@ jobs:
         with:
           node-version: 22
 
-      - run: npm install
+      - name: Install pinned Node dependencies
+        run: npm install --no-audit --no-fund --prefer-online
       - run: npx cap add android
       - run: node scripts_patch_android.js
 
@@ -47,5 +48,5 @@ jobs:
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: nyx-debug-apk-v26-${{ github.run_number }}
+          name: nyx-debug-apk-v27-${{ github.run_number }}
           path: android/app/build/outputs/apk/debug/app-debug.apk
