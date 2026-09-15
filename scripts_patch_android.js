@@ -47,20 +47,13 @@ if(!g.includes('androidx.biometric:biometric')){
 if(!g.includes('signingConfigs')){
   const signing=`
 
-signingConfigs {
-    release {
-        storeFile file(project.findProperty("NYX_STORE_FILE") ?: "nyx-release.keystore")
-        storePassword project.findProperty("NYX_STORE_PASSWORD") ?: ""
-        keyAlias project.findProperty("NYX_KEY_ALIAS") ?: "nyx"
-        keyPassword project.findProperty("NYX_KEY_PASSWORD") ?: ""
-    }
-}
+
 `;
   g=g.replace(/buildTypes \{/, signing+`\nbuildTypes {`);
   const bt=g.indexOf('buildTypes {');
   const rel=g.indexOf('release {', bt);
   if(rel !== -1){
-    g=g.slice(0, rel) + 'release {\n            signingConfig signingConfigs.release' + g.slice(rel + 'release {'.length);
+    g=g.slice(0, rel) + 'release {\n            ' + g.slice(rel + 'release {'.length);
   } else {
     throw new Error('Release build type not found');
   }
