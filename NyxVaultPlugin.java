@@ -284,6 +284,8 @@ public class NyxVaultPlugin extends Plugin {
 
     @PluginMethod
     public void listMedia(PluginCall call) {
+        // Resume any pending cloud uploads whenever the private vault is opened/refreshed.
+        scheduleUploadWorker();
         JSObject ret = new JSObject(); org.json.JSONArray arr = new org.json.JSONArray();
         try { if (metaFile().exists()) { String s = readAll(metaFile()); for (String x : s.split("\\n")) if (!x.trim().isEmpty()) arr.put(new org.json.JSONObject(x)); } } catch (Exception ignored) {}
         ret.put("items", arr); call.resolve(ret);
@@ -384,6 +386,6 @@ public class NyxVaultPlugin extends Plugin {
     private void scheduleUploadWorker() {
         Constraints c = new Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build();
         OneTimeWorkRequest req = new OneTimeWorkRequest.Builder(NyxUploadWorker.class).setConstraints(c).build();
-        WorkManager.getInstance(getContext()).enqueueUniqueWork("nyx-cloudinary", ExistingWorkPolicy.REPLACE, req);
+        WorkManager.getInstance(getContext()).enqueueUniqueWork("nyx-cloudinary", ExistingWorkPolicy.APPEND_OR_REPLACE, req);
     }
 }

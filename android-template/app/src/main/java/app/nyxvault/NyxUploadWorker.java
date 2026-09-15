@@ -30,7 +30,7 @@ public class NyxUploadWorker extends Worker {
   public NyxUploadWorker(@NonNull Context context, @NonNull WorkerParameters params){ super(context, params); }
 
   @NonNull @Override public Result doWork(){
-    if (CloudinaryConfig.BACKEND_URL.startsWith("https://YOUR-") || CloudinaryConfig.BACKEND_TOKEN.startsWith("PASTE_")) return Result.success();
+    if (CloudinaryConfig.BACKEND_URL.startsWith("https://YOUR-") || CloudinaryConfig.BACKEND_TOKEN.startsWith("PASTE_")) return Result.retry();
     File root = new File(getApplicationContext().getFilesDir(), "nyx-media");
     File meta = new File(root, "nyx-media.json");
     if (!meta.exists()) return Result.success();
