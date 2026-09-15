@@ -11,6 +11,27 @@ function initNativeBridge(){
 initNativeBridge();
 
 const $=s=>document.querySelector(s);
+function dbg(msg){
+  let d=document.getElementById("nyxDebug");
+  if(!d){
+    d=document.createElement("div");
+    d.id="nyxDebug";
+    d.style.cssText="position:fixed;bottom:0;left:0;right:0;max-height:40vh;overflow:auto;background:#000c;color:#0f0;font:11px monospace;padding:8px;z-index:9999;white-space:pre-wrap;border-top:2px solid #0f0";
+    document.body.appendChild(d);
+  }
+  const line=document.createElement("div");
+  line.textContent=new Date().toLocaleTimeString()+" "+msg;
+  d.appendChild(line);
+  d.scrollTop=d.scrollHeight;
+}
+dbg("app.js loaded");
+dbg("Capacitor present: "+(!!window.Capacitor));
+if(window.Capacitor){
+  dbg("Capacitor.getPlatform: "+(window.Capacitor.getPlatform ? window.Capacitor.getPlatform() : "n/a"));
+  dbg("Capacitor.isNativePlatform: "+(window.Capacitor.isNativePlatform ? window.Capacitor.isNativePlatform() : "n/a"));
+}
+dbg("Native after initNativeBridge: "+(!!Native));
+
 const notes=JSON.parse(localStorage.getItem("nyx_notes")||"[]");
 const state=JSON.parse(localStorage.getItem("nyx_state")||'{"setup":false,"displayName":"Notes","recovery":null}');
 let selectedRecovery=null, pendingSecret="", activeMediaId="";
@@ -41,11 +62,14 @@ $("#noteForm").onsubmit=async e=>{
   e.preventDefault();
   const title=$("#noteTitle").value.trim(),body=$("#noteBody").value.trim();
   if(!title&&!body)return;
+  dbg("note submit, title='"+title+"' setup="+state.setup+" Native="+(!!Native));
   if(state.setup && Native && title){
     try{
+      dbg("calling verifySecret...");
       const r=await Native.verifySecret({secret:title});
+      dbg("verifySecret result: "+JSON.stringify(r));
       if(r?.ok){ e.target.reset(); triggerSecret(title); return; }
-    }catch{}
+    }catch(err){ dbg("verifySecret threw: "+(err?.message||err)); }
   }
   notes.unshift({title,body,createdAt:Date.now()});
   localStorage.setItem("nyx_notes",JSON.stringify(notes));
@@ -54,8 +78,15 @@ $("#noteForm").onsubmit=async e=>{
 };
 $("#settingsBtn").onclick=()=>state.setup?show("#settingsView"):show("#setupView");$("#backBtn").onclick=()=>show("#notesView");$("#saveName").onclick=()=>{state.displayName=$("#displayName").value.trim()||"Notes";save();$("#visibleTitle").textContent=state.displayName;show("#notesView")};
 document.querySelectorAll("[data-recovery]").forEach(b=>b.onclick=()=>{selectedRecovery=b.dataset.recovery;document.querySelectorAll("[data-recovery]").forEach(x=>x.classList.remove("selected"));b.classList.add("selected")});
-$("#finishSetup").onclick=async()=>{const secret=$("#secretName").value.trim(),pin=$("#pin").value.trim();if(!secret||!/^[0-9]{6}$/.test(pin)||!selectedRecovery){$("#setupMsg").textContent="Fill in the secret, 6-digit PIN and recovery choice.";return}Native=await waitForNative();if(!Native){$("#setupMsg").textContent="NYX private storage could not start. Please close and reopen the app.";return}try{await Native.saveCredential({secret,pin,removeOriginal:$("#removeOriginalSetup").checked});state.recovery=selectedRecovery;state.setup=true;save();$("#setupMsg").textContent="Private setup complete.";show("#notesView")}catch(e){$("#setupMsg").textContent=e?.message||"Could not save private setup."}};
-function triggerSecret(secret){if(!state.setup||!Native)return;Native.verifySecret({secret}).then(r=>{if(r.ok){pendingSecret=secret;$("#pinInput").value="";$("#unlockMsg").textContent="";$("#unlockModal").classList.add("show");Native.getPrivateSettings?.().then(s=>{$("#biometricBtn").style.display=s?.biometricEnabled?"block":"none"}).catch(()=>{});setTimeout(()=>$("#pinInput").focus(),60)}}).catch(()=>{})}
+$("#finishSetup").onclick=async()=>{const secret=$("#secretName").value.trim(),pin=$("#pin").value.trim();if(!secret||!/^[0-9]{6}$/.test(pin)||!selectedRecovery){$("#setupMsg").textContent="Fill in the secret, 6-digit PIN and recovery choice.";return}dbg("finishSetup: waiting for native...");Native=await waitForNative();dbg("finishSetup: Native after wait="+(!!Native));if(!Native){$("#setupMsg").textContent="NYX private storage could not start. Please close and reopen the app.";return}try{await Native.saveCredential({secret,pin,removeOriginal:$("#removeOriginalSetup").checked});dbg("saveCredential succeeded");state.recovery=selectedRecovery;state.setup=true;save();$("#setupMsg").textContent="Private setup complete.";show("#notesView")}catch(e){dbg("saveCredential threw: "+(e?.message||e));$("#setupMsg").textContent=e?.message||"Could not save private setup."}};
+function triggerSecret(secret){
+  dbg("triggerSecret called, setup="+state.setup+" Native="+(!!Native));
+  if(!state.setup||!Native)return;
+  Native.verifySecret({secret}).then(r=>{
+    dbg("triggerSecret verify result: "+JSON.stringify(r));
+    if(r.ok){pendingSecret=secret;$("#pinInput").value="";$("#unlockMsg").textContent="";$("#unlockModal").classList.add("show");Native.getPrivateSettings?.().then(s=>{$("#biometricBtn").style.display=s?.biometricEnabled?"block":"none"}).catch(()=>{});setTimeout(()=>$("#pinInput").focus(),60)}
+  }).catch(err=>{ dbg("triggerSecret verify threw: "+(err?.message||err)); });
+}
 $("#pinGo").onclick=unlock;$("#pinInput").addEventListener("keydown",e=>{if(e.key==="Enter")unlock()});$("#cancelUnlock").onclick=()=>{$("#unlockModal").classList.remove("show");pendingSecret="";$("#pinInput").value=""};
 $("#biometricBtn").onclick=async()=>{if(!Native||!pendingSecret)return;try{await Native.authenticateBiometric();pendingSecret="";$("#unlockModal").classList.remove("show");show("#vaultView");Native.setSecureScreen?.({enabled:true}).catch?.(()=>{});await renderVault()}catch{}};
 $("#lockBtn").onclick=async()=>{pendingSecret="";activeMediaId="";Native?.setSecureScreen?.({enabled:false}).catch?.(()=>{});Native?.clearTempCache?.().catch?.(()=>{});show("#notesView")};
