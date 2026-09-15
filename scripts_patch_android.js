@@ -11,10 +11,12 @@ let text=fs.readFileSync(main,'utf8');
 if(!text.includes('NyxVaultPlugin')){
   if(main.endsWith('.java')){
     text=text.replace(/package ([^;]+);/,m=>m+'\n\nimport app.nyxvault.NyxVaultPlugin;');
-    text=text.replace(/(super\.onCreate\(savedInstanceState\);)/, '$1\n        registerPlugin(NyxVaultPlugin.class);');
+    text=text.replace(/(registerPlugin\(NyxVaultPlugin\.class\);)/g, '');
+    text=text.replace(/(super\.onCreate\(savedInstanceState\);)/, 'registerPlugin(NyxVaultPlugin.class);\n        $1');
   } else {
     text=text.replace(/package ([^\n]+)/,m=>m+'\n\nimport app.nyxvault.NyxVaultPlugin');
-    text=text.replace(/(super\.onCreate\(savedInstanceState\))/, '$1\n        registerPlugin(NyxVaultPlugin::class.java)');
+    text=text.replace(/(registerPlugin\(NyxVaultPlugin::class\.java\))/g, '');
+    text=text.replace(/(super\.onCreate\(savedInstanceState\))/, 'registerPlugin(NyxVaultPlugin::class.java)\n        $1');
   }
   fs.writeFileSync(main,text);
 }

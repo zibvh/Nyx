@@ -25,25 +25,6 @@ jobs:
       - run: npx cap add android
       - run: node scripts_patch_android.js
 
-      # Restore the SAME release signing key on every build.
-      # These values must be configured as GitHub Actions Secrets.
-      - name: Configure NYX release signing
-        env:
-          NYX_KEYSTORE_BASE64: ${{ secrets.NYX_KEYSTORE_BASE64 }}
-          NYX_STORE_PASSWORD: ${{ secrets.NYX_STORE_PASSWORD }}
-          NYX_KEY_ALIAS: ${{ secrets.NYX_KEY_ALIAS }}
-          NYX_KEY_PASSWORD: ${{ secrets.NYX_KEY_PASSWORD }}
-        run: |
-          test -n "$NYX_KEYSTORE_BASE64" || (echo "Missing GitHub Secret: NYX_KEYSTORE_BASE64" && exit 1)
-          mkdir -p android/app/signing
-          echo "$NYX_KEYSTORE_BASE64" | base64 --decode > android/app/signing/nyx-release.keystore
-          cat >> android/gradle.properties <<EOF
-          NYX_STORE_FILE=signing/nyx-release.keystore
-          NYX_STORE_PASSWORD=$NYX_STORE_PASSWORD
-          NYX_KEY_ALIAS=$NYX_KEY_ALIAS
-          NYX_KEY_PASSWORD=$NYX_KEY_PASSWORD
-          EOF
-
       - name: Set Android version
         run: |
           python3 - <<'PY'
@@ -66,5 +47,5 @@ jobs:
       - name: Upload debug APK
         uses: actions/upload-artifact@v4
         with:
-          name: nyx-debug-apk-v24-${{ github.run_number }}
+          name: nyx-debug-apk-v25-${{ github.run_number }}
           path: android/app/build/outputs/apk/debug/app-debug.apk
