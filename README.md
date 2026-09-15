@@ -22,3 +22,18 @@ See `server/README.md` and `.env.example`. Put Cloudinary credentials and `NYX_A
 
 ## Build
 GitHub Actions generates the Capacitor Android project, applies the native NYX plugin, FileProvider configuration, launcher logo, and dependencies, then builds the debug APK.
+
+## Updates without uninstalling
+
+NYX v22 uses a stable **release signing key** and automatically increases Android `versionCode` on each GitHub Actions run. Future signed builds can therefore be installed over the existing app without uninstalling it, as long as the signing key is preserved.
+
+Before running the first v22 build, create these four GitHub Actions repository secrets:
+
+- `NYX_KEYSTORE_BASE64` — base64 contents of the permanent NYX release keystore
+- `NYX_STORE_PASSWORD` — keystore password
+- `NYX_KEY_ALIAS` — key alias
+- `NYX_KEY_PASSWORD` — key password
+
+**Never commit the keystore or passwords to the repository.** Keep the same keystore and passwords for every future NYX release.
+
+Important: an APK signed with a different key cannot update an already-installed APK. If the v21 debug APK is already installed, it may need to be uninstalled once before installing the first v22 release-signed APK. After that first release-signed install, future NYX releases will update normally without uninstalling.

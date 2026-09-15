@@ -21,7 +21,6 @@ import javax.crypto.spec.GCMParameterSpec;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import android.security.keystore.KeyStoreException;
 
 public class NyxUploadWorker extends Worker {
   private static final int CHUNK = 6 * 1024 * 1024;

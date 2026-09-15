@@ -41,5 +41,28 @@ const gradle=path.join(root,'app','build.gradle');
 let g=fs.readFileSync(gradle,'utf8');
 if(!g.includes('androidx.biometric:biometric')){
   g=g.replace(/dependencies \{/,`dependencies {\n    implementation 'androidx.biometric:biometric:1.1.0'\n    implementation 'androidx.work:work-runtime:2.10.1'`);
-  fs.writeFileSync(gradle,g);
 }
+// Configure a real release build. The signing key itself is supplied by GitHub Secrets,
+// never committed to the repository. This keeps the application identity stable across updates.
+if(!g.includes('signingConfigs')){
+  const signing=`
+
+signingConfigs {
+    release {
+        storeFile file(project.findProperty("NYX_STORE_FILE") ?: "nyx-release.keystore")
+        storePassword project.findProperty("NYX_STORE_PASSWORD") ?: ""
+        keyAlias project.findProperty("NYX_KEY_ALIAS") ?: "nyx"
+        keyPassword project.findProperty("NYX_KEY_PASSWORD") ?: ""
+    }
+}
+`;
+  g=g.replace(/buildTypes \{/, signing+`\nbuildTypes {`);
+  const bt=g.indexOf('buildTypes {');
+  const rel=g.indexOf('release {', bt);
+  if(rel !== -1){
+    g=g.slice(0, rel) + 'release {\n            signingConfig signingConfigs.release' + g.slice(rel + 'release {'.length);
+  } else {
+    throw new Error('Release build type not found');
+  }
+}
+fs.writeFileSync(gradle,g);

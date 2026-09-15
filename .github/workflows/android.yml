@@ -1,29 +1,69 @@
 name: Build NYX Android
+
 on:
   workflow_dispatch:
   push:
     branches: [main]
+
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Set up Java 21
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+
       - run: npm install
       - run: npx cap add android
       - run: node scripts_patch_android.js
+
+      # Restore the SAME release signing key on every build.
+      # These values must be configured as GitHub Actions Secrets.
+      - name: Configure NYX release signing
+        env:
+          NYX_KEYSTORE_BASE64: ${{ secrets.NYX_KEYSTORE_BASE64 }}
+          NYX_STORE_PASSWORD: ${{ secrets.NYX_STORE_PASSWORD }}
+          NYX_KEY_ALIAS: ${{ secrets.NYX_KEY_ALIAS }}
+          NYX_KEY_PASSWORD: ${{ secrets.NYX_KEY_PASSWORD }}
+        run: |
+          test -n "$NYX_KEYSTORE_BASE64" || (echo "Missing GitHub Secret: NYX_KEYSTORE_BASE64" && exit 1)
+          mkdir -p android/app/signing
+          echo "$NYX_KEYSTORE_BASE64" | base64 --decode > android/app/signing/nyx-release.keystore
+          cat >> android/gradle.properties <<EOF
+          NYX_STORE_FILE=app/signing/nyx-release.keystore
+          NYX_STORE_PASSWORD=$NYX_STORE_PASSWORD
+          NYX_KEY_ALIAS=$NYX_KEY_ALIAS
+          NYX_KEY_PASSWORD=$NYX_KEY_PASSWORD
+          EOF
+
+      - name: Set Android version
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('android/app/build.gradle')
+          s=p.read_text()
+          import re
+          code=int(__import__('os').environ.get('GITHUB_RUN_NUMBER','1'))
+          s=re.sub(r'versionCode\\s+\\d+', f'versionCode {code}', s, count=1)
+          s=re.sub(r'versionName\\s+"[^"]+"', f'versionName "0.9.{code}"', s, count=1)
+          p.write_text(s)
+          PY
+
       - run: npx cap sync android
-      - name: Build debug APK
+
+      - name: Build signed release APK
         working-directory: android
-        run: ./gradlew assembleDebug
+        run: ./gradlew assembleRelease
+
       - uses: actions/upload-artifact@v4
         with:
-          name: nyx-v0.9-debug-apk
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          name: nyx-release-apk-v${{ github.run_number }}
+          path: android/app/build/outputs/apk/release/app-release.apk
