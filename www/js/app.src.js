@@ -37,12 +37,25 @@ function openMediaModal(id){activeMediaId=id;$("#mediaModal").classList.add("sho
 async function closeMedia(){activeMediaId="";$("#mediaModal").classList.remove("show");if(Native?.clearTempCache)try{await Native.clearTempCache()}catch{}}
 async function deleteActiveMedia(){if(!activeMediaId||!Native)return;if(!confirm("Delete this private copy? This cannot be undone."))return;try{await Native.deleteMedia({id:activeMediaId});await closeMedia();await renderVault()}catch{$("#mediaMsg").textContent="Could not delete media."}}
 async function loadPrivateSettings(){if(!Native)return;try{const s=await Native.getPrivateSettings();$("#bioToggle").checked=!!s.biometricEnabled;$("#bioToggle").disabled=!s.biometricAvailable;$("#bioStatus").textContent=s.biometricAvailable?(s.biometricEnabled?"Enabled on this device.":"Available on this device."):"Fingerprint/face authentication is not available.";$("#removeOriginalToggle").checked=s.removeOriginal!==false}catch{$("#bioStatus").textContent="Could not read private settings."}}
-$("#noteForm").onsubmit=e=>{e.preventDefault();const title=$("#noteTitle").value.trim(),body=$("#noteBody").value.trim();if(!title&&!body)return;notes.unshift({title,body,createdAt:Date.now()});localStorage.setItem("nyx_notes",JSON.stringify(notes));e.target.reset();renderNotes()};
+$("#noteForm").onsubmit=async e=>{
+  e.preventDefault();
+  const title=$("#noteTitle").value.trim(),body=$("#noteBody").value.trim();
+  if(!title&&!body)return;
+  if(state.setup && Native && title){
+    try{
+      const r=await Native.verifySecret({secret:title});
+      if(r?.ok){ e.target.reset(); triggerSecret(title); return; }
+    }catch{}
+  }
+  notes.unshift({title,body,createdAt:Date.now()});
+  localStorage.setItem("nyx_notes",JSON.stringify(notes));
+  e.target.reset();
+  renderNotes();
+};
 $("#settingsBtn").onclick=()=>state.setup?show("#settingsView"):show("#setupView");$("#backBtn").onclick=()=>show("#notesView");$("#saveName").onclick=()=>{state.displayName=$("#displayName").value.trim()||"Notes";save();$("#visibleTitle").textContent=state.displayName;show("#notesView")};
 document.querySelectorAll("[data-recovery]").forEach(b=>b.onclick=()=>{selectedRecovery=b.dataset.recovery;document.querySelectorAll("[data-recovery]").forEach(x=>x.classList.remove("selected"));b.classList.add("selected")});
 $("#finishSetup").onclick=async()=>{const secret=$("#secretName").value.trim(),pin=$("#pin").value.trim();if(!secret||!/^[0-9]{6}$/.test(pin)||!selectedRecovery){$("#setupMsg").textContent="Fill in the secret, 6-digit PIN and recovery choice.";return}Native=await waitForNative();if(!Native){$("#setupMsg").textContent="NYX private storage could not start. Please close and reopen the app.";return}try{await Native.saveCredential({secret,pin,removeOriginal:$("#removeOriginalSetup").checked});state.recovery=selectedRecovery;state.setup=true;save();$("#setupMsg").textContent="Private setup complete.";show("#notesView")}catch(e){$("#setupMsg").textContent=e?.message||"Could not save private setup."}};
 function triggerSecret(secret){if(!state.setup||!Native)return;Native.verifySecret({secret}).then(r=>{if(r.ok){pendingSecret=secret;$("#pinInput").value="";$("#unlockMsg").textContent="";$("#unlockModal").classList.add("show");Native.getPrivateSettings?.().then(s=>{$("#biometricBtn").style.display=s?.biometricEnabled?"block":"none"}).catch(()=>{});setTimeout(()=>$("#pinInput").focus(),60)}}).catch(()=>{})}
-let secretBuffer="";document.addEventListener("keydown",e=>{if(!state.setup||["INPUT","TEXTAREA","BUTTON"].includes(document.activeElement?.tagName))return;if(e.key==="Enter"){const s=secretBuffer.trim();secretBuffer="";if(s)triggerSecret(s);return}if(e.key.length===1&&!e.ctrlKey&&!e.metaKey&&!e.altKey)secretBuffer+=e.key;if(secretBuffer.length>100)secretBuffer=secretBuffer.slice(-100)});
 $("#pinGo").onclick=unlock;$("#pinInput").addEventListener("keydown",e=>{if(e.key==="Enter")unlock()});$("#cancelUnlock").onclick=()=>{$("#unlockModal").classList.remove("show");pendingSecret="";$("#pinInput").value=""};
 $("#biometricBtn").onclick=async()=>{if(!Native||!pendingSecret)return;try{await Native.authenticateBiometric();pendingSecret="";$("#unlockModal").classList.remove("show");show("#vaultView");Native.setSecureScreen?.({enabled:true}).catch?.(()=>{});await renderVault()}catch{}};
 $("#lockBtn").onclick=async()=>{pendingSecret="";activeMediaId="";Native?.setSecureScreen?.({enabled:false}).catch?.(()=>{});Native?.clearTempCache?.().catch?.(()=>{});show("#notesView")};
@@ -52,6 +65,6 @@ $("#privateSettingsBtn").onclick=async()=>{show("#privateSettingsView");await lo
 $("#changeCredentialBtn").onclick=()=>{$("#credentialModal").classList.add("show");$("#credentialMsg").textContent=""};$("#closeCredential").onclick=()=>$("#credentialModal").classList.remove("show");$("#saveCredential").onclick=async()=>{const oldSecret=$("#oldSecret").value.trim(),oldPin=$("#oldPin").value.trim(),newSecret=$("#newSecret").value.trim(),newPin=$("#newPin").value.trim();if(!oldSecret||!/^[0-9]{6}$/.test(oldPin)||!newSecret||!/^[0-9]{6}$/.test(newPin)){$("#credentialMsg").textContent="Use a secret and two valid 6-digit PINs.";return}try{await Native.changeCredential({oldSecret,oldPin,newSecret,newPin});pendingSecret="";$("#credentialModal").classList.remove("show");$("#privateMsg").textContent="Access details updated."}catch(e){$("#credentialMsg").textContent=e?.message||"Could not update access details."}};
 $("#visibleTitle").textContent=state.displayName||"Notes";$("#displayName").value=state.displayName||"Notes";renderNotes();
 window.addEventListener("load",()=>{
-  if(!state.setup) show("#setupView");
+  show(state.setup ? "#notesView" : "#setupView");
   setTimeout(()=>$("#splash")?.classList.add("hide"),1600);
 });
