@@ -28,6 +28,8 @@ import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
+import androidx.activity.result.ActivityResult;
+import com.getcapacitor.annotation.ActivityCallback;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
 import java.io.ByteArrayOutputStream;
@@ -204,52 +206,87 @@ public class NyxVaultPlugin extends Plugin {
 
     @PluginMethod
     public void pickMedia(PluginCall call) {
-        pendingPick = call;
         String source = call.getString("source", "files");
         Intent i;
-        int requestCode;
 
         if ("photos".equals(source) && Build.VERSION.SDK_INT >= 33) {
-            // Android Photo Picker: images + videos only.
+            // Android Photo Picker. One media item is returned reliably across Android 13+.
             i = new Intent(MediaStore.ACTION_PICK_IMAGES);
             i.setType("*/*");
             i.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"image/*", "video/*"});
-            i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
-            requestCode = PICK_CODE + 1;
         } else {
-            // Android Files/document picker: restrict accepted results to image/video.
+            // Android Files/document picker. Multiple image/video files are supported.
             i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
             i.setType("*/*");
             i.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"image/*", "video/*"});
             i.addCategory(Intent.CATEGORY_OPENABLE);
             i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
             i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
-            requestCode = PICK_CODE;
         }
-        getActivity().startActivityForResult(i, requestCode);
+        startActivityForResult(call, i, "mediaPickerResult");
     }
 
-    @Override
-    protected void handleOnActivityResult(int requestCode, int resultCode, Intent data) {
-        super.handleOnActivityResult(requestCode, resultCode, data);
-        if ((requestCode != PICK_CODE && requestCode != PICK_CODE + 1) || pendingPick == null) return;
+    @ActivityCallback
+    private void mediaPickerResult(PluginCall call, ActivityResult result) {
+        if (call == null) return;
         try {
-            if (resultCode != android.app.Activity.RESULT_OK || data == null) { pendingPick.reject("Cancelled"); pendingPick = null; return; }
+            if (result == null || result.getResultCode() != android.app.Activity.RESULT_OK) {
+                call.reject("Media picker cancelled");
+                return;
+            }
+            Intent data = result.getData();
+            if (data == null) {
+                call.reject("No media was returned by the picker");
+                return;
+            }
+
             ArrayList<Uri> uris = new ArrayList<>();
-            if (data.getClipData() != null) for (int i = 0; i < data.getClipData().getItemCount(); i++) uris.add(data.getClipData().getItemAt(i).getUri());
-            else if (data.getData() != null) uris.add(data.getData());
+            if (data.getClipData() != null) {
+                for (int i = 0; i < data.getClipData().getItemCount(); i++) {
+                    uris.add(data.getClipData().getItemAt(i).getUri());
+                }
+            } else if (data.getData() != null) {
+                uris.add(data.getData());
+            }
+            if (uris.isEmpty()) {
+                call.reject("No media was selected");
+                return;
+            }
+
             int ok = 0;
+            String firstError = null;
             for (Uri u : uris) {
                 try {
                     String pickedMime = getContext().getContentResolver().getType(u);
-                    if (pickedMime == null || !(pickedMime.startsWith("image/") || pickedMime.startsWith("video/"))) continue;
-                    if (Build.VERSION.SDK_INT >= 19 && requestCode == PICK_CODE) { try { getContext().getContentResolver().takePersistableUriPermission(u, Intent.FLAG_GRANT_READ_URI_PERMISSION); } catch (Exception ignoredPermission) {} }
-                    saveUri(u); ok++;
-                } catch (Exception ignored) {}
+                    if (pickedMime == null || !(pickedMime.startsWith("image/") || pickedMime.startsWith("video/"))) {
+                        if (firstError == null) firstError = "Selected file is not an image or video";
+                        continue;
+                    }
+                    // Persist permission is available for ACTION_OPEN_DOCUMENT (Files), not Photo Picker.
+                    try {
+                        if (Build.VERSION.SDK_INT >= 19) {
+                            getContext().getContentResolver().takePersistableUriPermission(u, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        }
+                    } catch (Exception ignoredPermission) {}
+                    saveUri(u);
+                    ok++;
+                } catch (Exception ex) {
+                    if (firstError == null) firstError = ex.getMessage();
+                }
+            }
+
+            if (ok == 0) {
+                call.reject(firstError == null ? "Could not import selected media" : firstError);
+                return;
             }
             scheduleUploadWorker();
-            JSObject ret = new JSObject(); ret.put("imported", ok); pendingPick.resolve(ret); pendingPick = null;
-        } catch (Exception e) { pendingPick.reject("Could not import media"); pendingPick = null; }
+            JSObject ret = new JSObject();
+            ret.put("imported", ok);
+            if (firstError != null) ret.put("warning", firstError);
+            call.resolve(ret);
+        } catch (Exception e) {
+            call.reject(e.getMessage() == null ? "Could not import media" : e.getMessage());
+        }
     }
 
     private void saveUri(Uri uri) throws Exception {
