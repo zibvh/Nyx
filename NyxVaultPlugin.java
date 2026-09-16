@@ -8,6 +8,7 @@ import android.provider.OpenableColumns;
 import android.provider.MediaStore;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.util.Size;
 import android.media.MediaMetadataRetriever;
 import android.os.Build;
 import android.view.Window;
@@ -69,7 +70,9 @@ public class NyxVaultPlugin extends Plugin {
     private static final int PBKDF2_ITERATIONS = 150000;
     private static final int GCM_TAG_BITS = 128;
     private static final int PICK_CODE = 7137;
-    private PluginCall pendingPick;
+    private final ArrayList<Uri> pendingMediaStoreDeletes = new ArrayList<>();
+    private int deleteRequestAttempts = 0;
+    private static final int DELETE_REQUEST_CODE = 7191;
 
     private File root() { File d = new File(getContext().getFilesDir(), ROOT); if (!d.exists()) d.mkdirs(); return d; }
     private File metaFile() { return new File(root(), META); }
@@ -209,11 +212,16 @@ public class NyxVaultPlugin extends Plugin {
         String source = call.getString("source", "files");
         Intent i;
 
-        if ("photos".equals(source) && Build.VERSION.SDK_INT >= 33) {
-            // Android Photo Picker. One media item is returned reliably across Android 13+.
-            i = new Intent(MediaStore.ACTION_PICK_IMAGES);
+        if ("photos".equals(source)) {
+            // Use the system media chooser instead of Photo Picker. This gives NYX a
+            // normal content URI and lets Android apply its user-confirmed MediaStore
+            // deletion flow when the selected item belongs to the device gallery.
+            i = new Intent(Intent.ACTION_GET_CONTENT);
             i.setType("*/*");
             i.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"image/*", "video/*"});
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
         } else {
             // Android Files/document picker. Multiple image/video files are supported.
             i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
@@ -262,9 +270,9 @@ public class NyxVaultPlugin extends Plugin {
                         if (firstError == null) firstError = "Selected file is not an image or video";
                         continue;
                     }
-                    // Persist permission is available for ACTION_OPEN_DOCUMENT (Files), not Photo Picker.
+                    // Persist permission for Files/document providers when offered.
                     try {
-                        if (Build.VERSION.SDK_INT >= 19) {
+                        if (Build.VERSION.SDK_INT >= 19 && "files".equals(call.getString("source", "files"))) {
                             getContext().getContentResolver().takePersistableUriPermission(u, Intent.FLAG_GRANT_READ_URI_PERMISSION);
                         }
                     } catch (Exception ignoredPermission) {}
@@ -280,9 +288,11 @@ public class NyxVaultPlugin extends Plugin {
                 return;
             }
             scheduleUploadWorker();
+            requestPendingMediaStoreDeletes();
             JSObject ret = new JSObject();
             ret.put("imported", ok);
             if (firstError != null) ret.put("warning", firstError);
+            ret.put("deleteConfirmationRequired", !pendingMediaStoreDeletes.isEmpty());
             call.resolve(ret);
         } catch (Exception e) {
             call.reject(e.getMessage() == null ? "Could not import media" : e.getMessage());
@@ -307,7 +317,17 @@ public class NyxVaultPlugin extends Plugin {
         long expected = querySize(uri);
         if (expected >= 0 && expected != copied) { out.delete(); throw new Exception("Size verification failed"); }
         boolean removed = false;
-        if (prefs().getBoolean("removeOriginal", true)) removed = deleteOriginal(uri);
+        if (prefs().getBoolean("removeOriginal", true)) {
+            // The encrypted NYX copy is complete and size-verified BEFORE we touch the source.
+            removed = deleteOriginal(uri);
+            if (!removed) {
+                // One immediate retry covers providers that briefly reject a delete after import.
+                removed = deleteOriginal(uri);
+            }
+            if (!removed && isMediaStoreUri(uri) && Build.VERSION.SDK_INT >= 30) {
+                if (!pendingMediaStoreDeletes.contains(uri)) pendingMediaStoreDeletes.add(uri);
+            }
+        }
         appendMeta(id, name, mime, copied, false, mime.startsWith("video/") ? "video" : "image", uri.toString(), removed);
     }
 
@@ -318,11 +338,105 @@ public class NyxVaultPlugin extends Plugin {
         return -1;
     }
 
+    private boolean isMediaStoreUri(Uri uri) {
+        return uri != null && MediaStore.AUTHORITY.equals(uri.getAuthority());
+    }
+
+    private boolean isAlreadyRemoved(Uri uri) {
+        try {
+            if (!metaFile().exists()) return false;
+            for (String x : readAll(metaFile()).split("\\n")) {
+                if (x.trim().isEmpty()) continue;
+                org.json.JSONObject o = new org.json.JSONObject(x);
+                if (uri.toString().equals(o.optString("original_uri"))) return o.optBoolean("original_removed", false);
+            }
+        } catch (Exception ignored) {}
+        return false;
+    }
+
+    private void requestPendingMediaStoreDeletes() {
+        if (Build.VERSION.SDK_INT < 30 || pendingMediaStoreDeletes.isEmpty()) return;
+        try {
+            ArrayList<Uri> batch = new ArrayList<>();
+            for (Uri uri : pendingMediaStoreDeletes) if (!batch.contains(uri)) batch.add(uri);
+            if (batch.isEmpty()) return;
+            deleteRequestAttempts = 1;
+            android.app.PendingIntent pi = MediaStore.createDeleteRequest(getContext().getContentResolver(), batch);
+            getActivity().startIntentSenderForResult(pi.getIntentSender(), DELETE_REQUEST_CODE, null, 0, 0, 0);
+        } catch (Exception ignored) {
+            notifyManualDeleteRequired();
+        }
+    }
+
+    private void retryOrFinishDeleteRequest() {
+        if (Build.VERSION.SDK_INT < 30 || pendingMediaStoreDeletes.isEmpty()) return;
+        if (deleteRequestAttempts < 2) {
+            try {
+                ArrayList<Uri> batch = new ArrayList<>();
+                for (Uri uri : pendingMediaStoreDeletes) if (!batch.contains(uri)) batch.add(uri);
+                deleteRequestAttempts = 2;
+                android.app.PendingIntent pi = MediaStore.createDeleteRequest(getContext().getContentResolver(), batch);
+                getActivity().startIntentSenderForResult(pi.getIntentSender(), DELETE_REQUEST_CODE, null, 0, 0, 0);
+                return;
+            } catch (Exception ignored) {}
+        }
+        notifyManualDeleteRequired();
+    }
+
+    private void notifyManualDeleteRequired() {
+        try {
+            JSObject data = new JSObject();
+            data.put("manualDeleteRequired", true);
+            data.put("message", "Your media is safely stored in NYX, but the original is still in Gallery/normal storage. Delete the original manually to complete the move.");
+            notifyListeners("deleteStatus", data);
+            pendingMediaStoreDeletes.clear();
+        } catch (Exception ignored) {}
+    }
+
+    @Override
+    protected void handleOnActivityResult(int requestCode, int resultCode, Intent data) {
+        super.handleOnActivityResult(requestCode, resultCode, data);
+        if (requestCode != DELETE_REQUEST_CODE) return;
+        if (resultCode != android.app.Activity.RESULT_OK) {
+            retryOrFinishDeleteRequest();
+            return;
+        }
+        try {
+            if (!metaFile().exists()) return;
+            List<String> rows = new ArrayList<>();
+            for (String x : readAll(metaFile()).split("\\n")) {
+                if (x.trim().isEmpty()) continue;
+                org.json.JSONObject o = new org.json.JSONObject(x);
+                String original = o.optString("original_uri", "");
+                if (!original.isEmpty() && pendingMediaStoreDeletes.contains(Uri.parse(original))) {
+                    o.put("original_removed", true);
+                }
+                rows.add(o.toString());
+            }
+            writeAll(metaFile(), String.join("\\n", rows));
+            pendingMediaStoreDeletes.clear();
+            deleteRequestAttempts = 0;
+            JSObject status = new JSObject();
+            status.put("manualDeleteRequired", false);
+            notifyListeners("deleteStatus", status);
+        } catch (Exception ignored) {
+            notifyManualDeleteRequired();
+        }
+    }
+
     private boolean deleteOriginal(Uri uri) {
         try {
-            if (DocumentsContract.isDocumentUri(getContext(), uri)) return DocumentsContract.deleteDocument(getContext().getContentResolver(), uri);
+            if (DocumentsContract.isDocumentUri(getContext(), uri)) {
+                return DocumentsContract.deleteDocument(getContext().getContentResolver(), uri);
+            }
             return getContext().getContentResolver().delete(uri, null, null) > 0;
-        } catch (Exception ignored) { return false; }
+        } catch (android.app.RecoverableSecurityException e) {
+            return false;
+        } catch (SecurityException e) {
+            return false;
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 
     private String queryName(Uri uri) {
@@ -338,6 +452,40 @@ public class NyxVaultPlugin extends Plugin {
         KeyGenerator kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
         kg.init(new KeyGenParameterSpec.Builder(KEY_ALIAS, KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT).setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE).setKeySize(256).setRandomizedEncryptionRequired(false).build());
         return kg.generateKey();
+    }
+
+    @PluginMethod
+    public void getUploadStatus(PluginCall call) {
+        JSObject ret = new JSObject();
+        org.json.JSONArray arr = new org.json.JSONArray();
+        try {
+            File f = new File(root(), "upload-status.json");
+            if (f.exists()) {
+                String text = readAll(f);
+                for (String line : text.split("\\n")) if (!line.trim().isEmpty()) arr.put(new org.json.JSONObject(line));
+            }
+        } catch (Exception ignored) {}
+        ret.put("items", arr); call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void getDebugLog(PluginCall call) {
+        JSObject ret = new JSObject();
+        try { ret.put("text", new File(root(), "nyx-debug.log").exists() ? readAll(new File(root(), "nyx-debug.log")) : "No debug events yet."); }
+        catch (Exception e) { ret.put("text", "Could not read debugger log: " + e.getMessage()); }
+        call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void clearDebugLog(PluginCall call) {
+        try { File f=new File(root(), "nyx-debug.log"); if(f.exists()) f.delete(); call.resolve(); }
+        catch(Exception e){ call.reject("Could not clear debugger log"); }
+    }
+
+    @PluginMethod
+    public void retryUploads(PluginCall call) {
+        scheduleUploadWorker();
+        JSObject ret=new JSObject(); ret.put("ok",true); call.resolve(ret);
     }
 
     @PluginMethod
@@ -358,10 +506,18 @@ public class NyxVaultPlugin extends Plugin {
             tmp = decryptToCache(id, "nyx_thumb_" + id + "_" + System.currentTimeMillis());
             Bitmap bmp;
             if (target.optString("mime").startsWith("video/")) {
-                MediaMetadataRetriever mmr = new MediaMetadataRetriever(); mmr.setDataSource(tmp.getAbsolutePath());
-                bmp = mmr.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC); mmr.release();
-            } else bmp = BitmapFactory.decodeFile(tmp.getAbsolutePath());
-            if (bmp == null) throw new Exception();
+                if (Build.VERSION.SDK_INT >= 29) {
+                    bmp = android.media.ThumbnailUtils.createVideoThumbnail(tmp, new Size(640, 640), null);
+                } else {
+                    MediaMetadataRetriever mmr = new MediaMetadataRetriever();
+                    mmr.setDataSource(tmp.getAbsolutePath());
+                    bmp = mmr.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
+                    mmr.release();
+                }
+            } else {
+                bmp = BitmapFactory.decodeFile(tmp.getAbsolutePath());
+            }
+            if (bmp == null) throw new Exception("No frame");
             int max = 360; float scale = Math.min(1f, max / (float)Math.max(bmp.getWidth(), bmp.getHeight()));
             if (scale < 1f) bmp = Bitmap.createScaledBitmap(bmp, Math.max(1,(int)(bmp.getWidth()*scale)), Math.max(1,(int)(bmp.getHeight()*scale)), true);
             ByteArrayOutputStream bos = new ByteArrayOutputStream(); bmp.compress(Bitmap.CompressFormat.JPEG, 82, bos); bmp.recycle();
