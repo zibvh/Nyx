@@ -12,6 +12,31 @@ initNativeBridge();
 
 const $=s=>document.querySelector(s);
 
+// Global tactile feedback: every tappable NYX action visibly acknowledges the tap immediately.
+(function installTapFeedback(){
+  const press=(el)=>{
+    if(!el||el.disabled||el.classList.contains("tap-no-feedback"))return;
+    el.classList.remove("tap-pulse");
+    void el.offsetWidth;
+    el.classList.add("tap-pulse");
+    clearTimeout(el.__nyxTapTimer);
+    el.__nyxTapTimer=setTimeout(()=>el.classList.remove("tap-pulse"),520);
+    if(!el.querySelector(".tap-ripple")){
+      const r=document.createElement("span"); r.className="tap-ripple"; r.setAttribute("aria-hidden","true"); el.appendChild(r);
+      setTimeout(()=>r.remove(),520);
+    }
+  };
+  document.addEventListener("pointerdown",e=>{
+    const el=e.target.closest("button,[role=button],input[type=submit],input[type=button]");
+    if(el) press(el);
+  },{passive:true});
+  document.addEventListener("keydown",e=>{
+    if(e.key!=="Enter"&&e.key!==" ")return;
+    const el=e.target.closest("button,[role=button],input[type=submit],input[type=button]");
+    if(el) press(el);
+  });
+})();
+
 if(window.Capacitor){
 
 }
@@ -118,7 +143,7 @@ $("#closePickerChoice").onclick=()=>$("#pickerChoiceModal").classList.remove("sh
 let debugTimer=null;
 async function refreshDebugger(){if(!Native?.getDebugLog)return;try{const [log,status]=await Promise.all([Native.getDebugLog(),Native.getUploadStatus()]);const items=status.items||[];const active=items.filter(x=>x.state==="uploading"),failed=items.filter(x=>x.state==="failed");$("#debugStatus").textContent=active.length?`${active.length} upload${active.length>1?"s":""} in progress${failed.length?` · ${failed.length} failed`:""}`:(failed.length?`${failed.length} upload${failed.length>1?"s":""} failed`:(items.length?"No active uploads.":"No upload records yet."));$("#debugLog").textContent=log?.text||"No debug events yet.";const el=$("#debugLog");el.scrollTop=el.scrollHeight}catch(e){$("#debugLog").textContent="Debugger error: "+(e?.message||e)}}
 $("#debugBtn").onclick=async()=>{$("#debugModal").classList.add("show");await refreshDebugger();clearInterval(debugTimer);debugTimer=setInterval(refreshDebugger,1000)};$("#closeDebug").onclick=()=>{$("#debugModal").classList.remove("show");clearInterval(debugTimer);debugTimer=null};$("#retryUploads").onclick=async()=>{try{await Native.retryUploads();await refreshDebugger();await refreshUploadStatus()}catch{}};$("#clearDebug").onclick=async()=>{try{await Native.clearDebugLog();await refreshDebugger()}catch{}};
-$("#vaultGrid").addEventListener("click",e=>{const b=e.target.closest(".media");if(b)openMediaModal(b.dataset.id)});$("#closeMedia").onclick=closeMedia;$("#deleteMediaBtn").onclick=deleteActiveMedia;$("#openMediaBtn").onclick=()=>activeMediaId&&Native.openMedia({id:activeMediaId}).catch(()=>{$("#mediaMsg").textContent="Could not open media."});
+$("#vaultGrid").addEventListener("click",e=>{const b=e.target.closest(".media");if(b)openMediaModal(b.dataset.id)});$("#closeMedia").onclick=closeMedia;$("#deleteMediaBtn").onclick=deleteActiveMedia;$("#openMediaBtn").onclick=async()=>{if(!activeMediaId||!Native)return;try{await Native.openMedia({id:activeMediaId});closeMedia()}catch(e){$("#mediaMsg").textContent=e?.message||"Could not open media."}};
 $("#privateSettingsBtn").onclick=async()=>{show("#privateSettingsView");await loadPrivateSettings()};$("#privateBackBtn").onclick=()=>show("#vaultView");$("#savePrivateSettings").onclick=async()=>{try{await Native.setPrivateSettings({biometricEnabled:$("#bioToggle").checked,removeOriginal:$("#removeOriginalToggle").checked});$("#privateMsg").textContent="Private settings saved."}catch{$("#privateMsg").textContent="Could not save settings."}};
 $("#changeCredentialBtn").onclick=()=>{$("#credentialModal").classList.add("show");$("#credentialMsg").textContent=""};$("#closeCredential").onclick=()=>$("#credentialModal").classList.remove("show");$("#saveCredential").onclick=async()=>{const oldSecret=$("#oldSecret").value.trim(),oldPin=$("#oldPin").value.trim(),newSecret=$("#newSecret").value.trim(),newPin=$("#newPin").value.trim();if(!oldSecret||!/^[0-9]{6}$/.test(oldPin)||!newSecret||!/^[0-9]{6}$/.test(newPin)){$("#credentialMsg").textContent="Use a secret and two valid 6-digit PINs.";return}try{await Native.changeCredential({oldSecret,oldPin,newSecret,newPin});pendingSecret="";$("#credentialModal").classList.remove("show");$("#privateMsg").textContent="Access details updated."}catch(e){$("#credentialMsg").textContent=e?.message||"Could not update access details."}};
 setInterval(()=>{if(state.setup && Native){refreshUploadStatus();}},1000);

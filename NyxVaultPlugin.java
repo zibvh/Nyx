@@ -529,14 +529,47 @@ public class NyxVaultPlugin extends Plugin {
     @PluginMethod
     public void openMedia(PluginCall call) {
         String id = call.getString("id", ""); if (id.isEmpty()) { call.reject("Missing id"); return; }
+        File tmp = null;
         try {
-            org.json.JSONObject target = findMeta(id); if (target == null) throw new Exception();
-            File tmp = decryptToCache(id, "nyx_open_" + id + "_" + System.currentTimeMillis());
+            org.json.JSONObject target = findMeta(id); if (target == null) throw new Exception("Media not found");
+            String mime = target.optString("mime", "application/octet-stream");
+            String originalName = target.optString("name", "media");
+            String suffix = fileSuffix(originalName, mime);
+            tmp = decryptToCache(id, "nyx_open_" + id + "_" + System.currentTimeMillis() + suffix);
             Uri uri = FileProvider.getUriForFile(getContext(), getContext().getPackageName() + ".nyxfiles", tmp);
-            Intent i = new Intent(Intent.ACTION_VIEW); i.setDataAndType(uri, target.optString("mime", "application/octet-stream")); i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            getActivity().startActivity(i);
+            Intent i = new Intent(Intent.ACTION_VIEW);
+            i.setDataAndType(uri, mime);
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
+            if (i.resolveActivity(getContext().getPackageManager()) == null) {
+                if (tmp != null) tmp.delete();
+                throw new Exception("No compatible media viewer installed");
+            }
+            getActivity().startActivity(Intent.createChooser(i, "Open with"));
             JSObject ret = new JSObject(); ret.put("opened", true); call.resolve(ret);
-        } catch (Exception e) { call.reject("Could not open media"); }
+        } catch (Exception e) {
+            if (tmp != null && tmp.exists()) tmp.delete();
+            call.reject("Could not open media: " + (e.getMessage() == null ? "No compatible viewer" : e.getMessage()));
+        }
+    }
+
+    private String fileSuffix(String name, String mime) {
+        String n = name == null ? "" : name.trim();
+        int dot = n.lastIndexOf('.');
+        if (dot > 0 && dot < n.length() - 1) {
+            String ext = n.substring(dot);
+            if (ext.matches("\\.[A-Za-z0-9]{1,8}")) return ext;
+        }
+        if (mime != null) {
+            if (mime.equals("image/jpeg")) return ".jpg";
+            if (mime.equals("image/png")) return ".png";
+            if (mime.equals("image/webp")) return ".webp";
+            if (mime.equals("image/gif")) return ".gif";
+            if (mime.equals("video/mp4")) return ".mp4";
+            if (mime.equals("video/webm")) return ".webm";
+            if (mime.equals("video/3gpp")) return ".3gp";
+            if (mime.equals("video/quicktime")) return ".mov";
+        }
+        return "";
     }
 
     @PluginMethod

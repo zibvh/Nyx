@@ -528,15 +528,17 @@ public class NyxVaultPlugin extends Plugin {
 
     @PluginMethod
     public void openMedia(PluginCall call) {
-        String id = call.getString("id", ""); if (id.isEmpty()) { call.reject("Missing id"); return; }
+        String id = call.getString("id", "");
+        if (id.isEmpty()) { call.reject("Missing id"); return; }
         try {
-            org.json.JSONObject target = findMeta(id); if (target == null) throw new Exception();
-            File tmp = decryptToCache(id, "nyx_open_" + id + "_" + System.currentTimeMillis());
-            Uri uri = FileProvider.getUriForFile(getContext(), getContext().getPackageName() + ".nyxfiles", tmp);
-            Intent i = new Intent(Intent.ACTION_VIEW); i.setDataAndType(uri, target.optString("mime", "application/octet-stream")); i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            if (findMeta(id) == null) throw new Exception("Media not found");
+            Intent i = new Intent(getContext(), NyxMediaViewerActivity.class);
+            i.putExtra("media_id", id);
             getActivity().startActivity(i);
             JSObject ret = new JSObject(); ret.put("opened", true); call.resolve(ret);
-        } catch (Exception e) { call.reject("Could not open media"); }
+        } catch (Exception e) {
+            call.reject("Could not open media: " + (e.getMessage() == null ? "Media unavailable" : e.getMessage()));
+        }
     }
 
     @PluginMethod

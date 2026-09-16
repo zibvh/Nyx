@@ -3,7 +3,7 @@ const path=require('path');
 const root=path.resolve('android');
 const pkg=path.join(root,'app','src','main','java','app','nyxvault');
 fs.mkdirSync(pkg,{recursive:true});
-for(const f of ['NyxVaultPlugin.java','NyxUploadWorker.java','CloudinaryConfig.java']) fs.copyFileSync(path.join('android-template','app','src','main','java','app','nyxvault',f),path.join(pkg,f));
+for(const f of ['NyxVaultPlugin.java','NyxUploadWorker.java','CloudinaryConfig.java','NyxMediaViewerActivity.java']) fs.copyFileSync(path.join('android-template','app','src','main','java','app','nyxvault',f),path.join(pkg,f));
 function findMain(dir){
   for(const n of fs.readdirSync(dir,{withFileTypes:true})){
     const p=path.join(dir,n.name);
@@ -40,7 +40,11 @@ if(fs.existsSync(manifest)){
   let m=fs.readFileSync(manifest,'utf8');
   m=m.replace(/android:icon="[^"]+"/,'android:icon="@drawable/nyx_logo"');
   m=m.replace(/android:roundIcon="[^"]+"/,'android:roundIcon="@drawable/nyx_logo"');
-  if(!m.includes('androidx.core.content.FileProvider')){
+    if(!m.includes('NyxMediaViewerActivity')){
+    const activity='<activity android:name="app.nyxvault.NyxMediaViewerActivity" android:exported="false" android:screenOrientation="portrait" />';
+    m=m.replace('</application>',activity+'</application>');
+  }
+if(!m.includes('androidx.core.content.FileProvider')){
     const provider='<provider android:name="androidx.core.content.FileProvider" android:authorities="\${applicationId}.nyxfiles" android:exported="false" android:grantUriPermissions="true"><meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/nyx_file_paths" /></provider>';
     m=m.replace('</application>',provider+'</application>');
   }
