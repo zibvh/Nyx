@@ -57,5 +57,18 @@ if(!g.includes('androidx.biometric:biometric')){
   g=g.replace(/dependencies \{/,`dependencies {\n    implementation 'androidx.biometric:biometric:1.1.0'\n    implementation 'androidx.media3:media3-exoplayer:1.5.1'
     implementation 'androidx.media3:media3-ui:1.5.1'`);
 }
-// v26 intentionally builds DEBUG only. No release signing or keystore configuration.
+// Configure release signing. GitHub Actions recreates nyx-release.jks inside android/
+// from the NYX_KEYSTORE_BASE64 repository secret before running this script.
+if(!g.includes('NYX_KEYSTORE_PASSWORD')){
+  g=g.replace(/android \{/, `android {
+    signingConfigs {
+        release {
+            storeFile file("$rootDir/nyx-release.jks")
+            storePassword System.getenv("NYX_KEYSTORE_PASSWORD")
+            keyAlias System.getenv("NYX_KEY_ALIAS")
+            keyPassword System.getenv("NYX_KEY_PASSWORD")
+        }
+    }`);
+  g=g.replace(/buildTypes \{\s*release \{/, `buildTypes {\n        release {\n            signingConfig signingConfigs.release`);
+}
 fs.writeFileSync(gradle,g);

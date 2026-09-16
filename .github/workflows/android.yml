@@ -23,7 +23,17 @@ jobs:
 
       - name: Install pinned Node dependencies
         run: npm install --no-audit --no-fund --prefer-online
+      - name: Create release keystore from GitHub Secret
+        env:
+          NYX_KEYSTORE_BASE64: ${{ secrets.NYX_KEYSTORE_BASE64 }}
+        run: |
+          if [ -z "$NYX_KEYSTORE_BASE64" ]; then echo "NYX_KEYSTORE_BASE64 is not configured"; exit 1; fi
+          echo "$NYX_KEYSTORE_BASE64" | base64 --decode > nyx-release.jks
+          test -s nyx-release.jks
+
       - run: npx cap add android
+      - name: Move release keystore into Android project
+        run: mv nyx-release.jks android/nyx-release.jks
       - run: node scripts_patch_android.js
 
       - name: Set Android version
@@ -41,12 +51,16 @@ jobs:
 
       - run: npx cap sync android
 
-      - name: Build debug APK
+      - name: Build signed release APK
         working-directory: android
-        run: ./gradlew assembleDebug
+        env:
+          NYX_KEYSTORE_PASSWORD: ${{ secrets.NYX_KEYSTORE_PASSWORD }}
+          NYX_KEY_ALIAS: ${{ secrets.NYX_KEY_ALIAS }}
+          NYX_KEY_PASSWORD: ${{ secrets.NYX_KEY_PASSWORD }}
+        run: ./gradlew assembleRelease
 
-      - name: Upload debug APK
+      - name: Upload signed release APK
         uses: actions/upload-artifact@v4
         with:
-          name: nyx-debug-apk-v37-${{ github.run_number }}
-          path: android/app/build/outputs/apk/debug/app-debug.apk
+          name: nyx-release-apk-${{ github.run_number }}
+          path: android/app/build/outputs/apk/release/app-release.apk
