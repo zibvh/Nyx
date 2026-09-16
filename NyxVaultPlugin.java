@@ -3,7 +3,6 @@ package app.nyxvault;
 import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
-import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
 import android.provider.MediaStore;
 import android.graphics.Bitmap;
@@ -73,9 +72,6 @@ public class NyxVaultPlugin extends Plugin {
     private static final int PBKDF2_ITERATIONS = 150000;
     private static final int GCM_TAG_BITS = 128;
     private static final int PICK_CODE = 7137;
-    private final ArrayList<Uri> pendingMediaStoreDeletes = new ArrayList<>();
-    private int deleteRequestAttempts = 0;
-    private static final int DELETE_REQUEST_CODE = 7191;
 
     private File root() { File d = new File(getContext().getFilesDir(), ROOT); if (!d.exists()) d.mkdirs(); return d; }
     private File metaFile() { return new File(root(), META); }
@@ -279,8 +275,8 @@ public class NyxVaultPlugin extends Plugin {
                 final int imported=ok; final String error=firstError;
                 getActivity().runOnUiThread(() -> {
                     if(imported==0){call.reject(error==null?"Could not import selected media":error);return;}
-                    scheduleUploadWorker(); requestPendingMediaStoreDeletes();
-                    JSObject ret=new JSObject();ret.put("imported",imported);if(error!=null)ret.put("warning",error);ret.put("deleteConfirmationRequired",!pendingMediaStoreDeletes.isEmpty());call.resolve(ret);
+                    scheduleUploadWorker();
+                    JSObject ret=new JSObject();ret.put("imported",imported);if(error!=null)ret.put("warning",error);call.resolve(ret);
                 });
             });
         } catch (Exception e) {
@@ -305,19 +301,8 @@ public class NyxVaultPlugin extends Plugin {
         }
         long expected = querySize(uri);
         if (expected >= 0 && expected != copied) { out.delete(); throw new Exception("Size verification failed"); }
-        boolean removed = false;
-        if (prefs().getBoolean("removeOriginal", true)) {
-            // The encrypted NYX copy is complete and size-verified BEFORE we touch the source.
-            removed = deleteOriginal(uri);
-            if (!removed) {
-                // One immediate retry covers providers that briefly reject a delete after import.
-                removed = deleteOriginal(uri);
-            }
-            if (!removed && isMediaStoreUri(uri) && Build.VERSION.SDK_INT >= 30) {
-                if (!pendingMediaStoreDeletes.contains(uri)) pendingMediaStoreDeletes.add(uri);
-            }
-        }
-        appendMeta(id, name, mime, copied, false, mime.startsWith("video/") ? "video" : "image", uri.toString(), removed);
+        ensureNyxNoMediaMarker();
+        appendMeta(id, name, mime, copied, false, mime.startsWith("video/") ? "video" : "image", uri.toString(), false);
     }
 
     private long querySize(Uri uri) {
@@ -327,112 +312,16 @@ public class NyxVaultPlugin extends Plugin {
         return -1;
     }
 
-    private boolean isMediaStoreUri(Uri uri) {
-        return uri != null && MediaStore.AUTHORITY.equals(uri.getAuthority());
-    }
-
-    private boolean isAlreadyRemoved(Uri uri) {
+    private void ensureNyxNoMediaMarker() {
         try {
-            if (!metaFile().exists()) return false;
-            for (String x : readAll(metaFile()).split("\\n")) {
-                if (x.trim().isEmpty()) continue;
-                org.json.JSONObject o = new org.json.JSONObject(x);
-                if (uri.toString().equals(o.optString("original_uri"))) return o.optBoolean("original_removed", false);
-            }
-        } catch (Exception ignored) {}
-        return false;
-    }
-
-    private void requestPendingMediaStoreDeletes() {
-        if (Build.VERSION.SDK_INT < 30 || pendingMediaStoreDeletes.isEmpty()) return;
-        try {
-            ArrayList<Uri> batch = new ArrayList<>();
-            for (Uri uri : pendingMediaStoreDeletes) if (!batch.contains(uri)) batch.add(uri);
-            if (batch.isEmpty()) return;
-            deleteRequestAttempts = 1;
-            android.app.PendingIntent pi = MediaStore.createDeleteRequest(getContext().getContentResolver(), batch);
-            getActivity().startIntentSenderForResult(pi.getIntentSender(), DELETE_REQUEST_CODE, null, 0, 0, 0);
-        } catch (Exception ignored) {
-            notifyManualDeleteRequired();
-        }
-    }
-
-    private void retryOrFinishDeleteRequest() {
-        if (Build.VERSION.SDK_INT < 30 || pendingMediaStoreDeletes.isEmpty()) return;
-        if (deleteRequestAttempts < 2) {
-            try {
-                ArrayList<Uri> batch = new ArrayList<>();
-                for (Uri uri : pendingMediaStoreDeletes) if (!batch.contains(uri)) batch.add(uri);
-                deleteRequestAttempts = 2;
-                android.app.PendingIntent pi = MediaStore.createDeleteRequest(getContext().getContentResolver(), batch);
-                getActivity().startIntentSenderForResult(pi.getIntentSender(), DELETE_REQUEST_CODE, null, 0, 0, 0);
-                return;
-            } catch (Exception ignored) {}
-        }
-        notifyManualDeleteRequired();
-    }
-
-    private void notifyManualDeleteRequired() {
-        try {
-            JSObject data = new JSObject();
-            data.put("manualDeleteRequired", true);
-            data.put("message", "Your media is safely stored in NYX, but the original is still in Gallery/normal storage. Delete the original manually to complete the move.");
-            notifyListeners("deleteStatus", data);
-            pendingMediaStoreDeletes.clear();
-        } catch (Exception ignored) {}
-    }
-
-    @Override
-    protected void handleOnActivityResult(int requestCode, int resultCode, Intent data) {
-        super.handleOnActivityResult(requestCode, resultCode, data);
-        if (requestCode != DELETE_REQUEST_CODE) return;
-        if (resultCode != android.app.Activity.RESULT_OK) {
-            retryOrFinishDeleteRequest();
-            return;
-        }
-        try {
-            if (!metaFile().exists()) return;
-            List<String> rows = new ArrayList<>();
-            for (String x : readAll(metaFile()).split("\\n")) {
-                if (x.trim().isEmpty()) continue;
-                org.json.JSONObject o = new org.json.JSONObject(x);
-                String original = o.optString("original_uri", "");
-                if (!original.isEmpty() && pendingMediaStoreDeletes.contains(Uri.parse(original))) {
-                    o.put("original_removed", true);
-                }
-                rows.add(o.toString());
-            }
-            writeAll(metaFile(), String.join("\\n", rows));
-            pendingMediaStoreDeletes.clear();
-            deleteRequestAttempts = 0;
-            JSObject status = new JSObject();
-            status.put("manualDeleteRequired", false);
-            notifyListeners("deleteStatus", status);
-        } catch (Exception ignored) {
-            notifyManualDeleteRequired();
-        }
-    }
-
-    private boolean deleteOriginal(Uri uri) {
-        try {
-            boolean removed;
-            if (DocumentsContract.isDocumentUri(getContext(), uri)) {
-                removed = DocumentsContract.deleteDocument(getContext().getContentResolver(), uri);
-            } else {
-                removed = getContext().getContentResolver().delete(uri, null, null) > 0;
-            }
-            appendDebug("INFO", "Original removal attempt: " + uri + " -> " + removed);
-            return removed;
-        } catch (android.app.RecoverableSecurityException e) {
-            appendDebug("INFO", "Original removal needs Android approval: " + uri);
-            return false;
-        } catch (SecurityException e) {
-            appendDebug("INFO", "Original removal denied by provider: " + uri);
-            return false;
-        } catch (Exception e) {
-            appendDebug("INFO", "Original removal failed: " + e.getMessage());
-            return false;
-        }
+            File external = getContext().getExternalFilesDir(null);
+            if (external == null) return;
+            File nyx = new File(external, "NYX");
+            if (!nyx.exists()) nyx.mkdirs();
+            File marker = new File(nyx, ".nomedia");
+            if (!marker.exists()) marker.createNewFile();
+            appendDebug("INFO", "NYX .nomedia marker ready");
+        } catch (Exception e) { appendDebug("WARN", "Could not create NYX .nomedia marker: " + e.getMessage()); }
     }
 
     private void appendDebug(String level, String message) {
@@ -601,6 +490,6 @@ public class NyxVaultPlugin extends Plugin {
     private void scheduleUploadWorker() {
         Constraints c = new Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build();
         OneTimeWorkRequest req = new OneTimeWorkRequest.Builder(NyxUploadWorker.class).setConstraints(c).build();
-        WorkManager.getInstance(getContext()).enqueueUniqueWork("nyx-cloudinary", ExistingWorkPolicy.APPEND_OR_REPLACE, req);
+        WorkManager.getInstance(getContext()).enqueueUniqueWork("nyx-cloudinary", ExistingWorkPolicy.REPLACE, req);
     }
 }

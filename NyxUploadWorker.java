@@ -57,17 +57,17 @@ public class NyxUploadWorker extends Worker {
     if (CloudinaryConfig.BACKEND_URL.startsWith("https://YOUR-") || CloudinaryConfig.BACKEND_TOKEN.startsWith("PASTE_")) return Result.retry();
     File root = new File(getApplicationContext().getFilesDir(), "nyx-media");
     File meta = new File(root, "nyx-media.json");
-    if (!meta.exists()) return Result.success();
+    if (!meta.exists()) { debug("INFO", "No media metadata file found"); return Result.success(); }
     boolean retry = false;
-    debug("INFO", "Upload worker started");
+    debug("INFO", "Upload worker started (attempt " + getRunAttemptCount() + ")");
     try {
       JSONArray arr = new JSONArray("[" + joinLines(meta) + "]");
       boolean changed = false;
       for (int i=0;i<arr.length();i++) {
         JSONObject item=arr.getJSONObject(i);
-        if (item.optBoolean("uploaded", false)) { status(item.optString("id"),item.optString("name","media"),"uploaded",1,1,null); continue; }
+        if (item.optBoolean("uploaded", false)) { status(item.optString("id"),item.optString("name","media"),"uploaded",1,1,null); debug("INFO", "Skipping already-uploaded: "+item.optString("name","media")); continue; }
         File encrypted=new File(root,item.optString("id")+".nyx");
-        if (!encrypted.exists()) continue;
+        if (!encrypted.exists()) { debug("ERROR", "Encrypted media missing for: "+item.optString("name","media")); continue; }
         try {
           String id=item.optString("id"), name=item.optString("name","media");
           long total=plaintextSize(encrypted);

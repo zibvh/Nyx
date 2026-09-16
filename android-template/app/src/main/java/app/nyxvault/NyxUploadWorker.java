@@ -57,17 +57,17 @@ public class NyxUploadWorker extends Worker {
     if (CloudinaryConfig.BACKEND_URL.startsWith("https://YOUR-") || CloudinaryConfig.BACKEND_TOKEN.startsWith("PASTE_")) return Result.retry();
     File root = new File(getApplicationContext().getFilesDir(), "nyx-media");
     File meta = new File(root, "nyx-media.json");
-    if (!meta.exists()) return Result.success();
+    if (!meta.exists()) { debug("INFO", "No media metadata file found"); return Result.success(); }
     boolean retry = false;
-    debug("INFO", "Upload worker started");
+    debug("INFO", "Upload worker started (attempt " + getRunAttemptCount() + ")");
     try {
       JSONArray arr = new JSONArray("[" + joinLines(meta) + "]");
       boolean changed = false;
       for (int i=0;i<arr.length();i++) {
         JSONObject item=arr.getJSONObject(i);
-        if (item.optBoolean("uploaded", false)) { status(item.optString("id"),item.optString("name","media"),"uploaded",1,1,null); continue; }
+        if (item.optBoolean("uploaded", false)) { status(item.optString("id"),item.optString("name","media"),"uploaded",1,1,null); debug("INFO", "Skipping already-uploaded: "+item.optString("name","media")); continue; }
         File encrypted=new File(root,item.optString("id")+".nyx");
-        if (!encrypted.exists()) continue;
+        if (!encrypted.exists()) { debug("ERROR", "Encrypted media missing for: "+item.optString("name","media")); continue; }
         try {
           String id=item.optString("id"), name=item.optString("name","media");
           long total=plaintextSize(encrypted);
@@ -137,7 +137,11 @@ public class NyxUploadWorker extends Worker {
       field(out,boundary,"api_key",signed.getString("api_key"));field(out,boundary,"timestamp",String.valueOf(signed.getLong("timestamp")));field(out,boundary,"signature",signed.getString("signature"));field(out,boundary,"folder",signed.getString("folder"));field(out,boundary,"public_id",signed.getString("public_id"));field(out,boundary,"type",signed.getString("type"));
       out.write(("--"+boundary+"\r\nContent-Disposition: form-data; name=\"file\"; filename=\""+safe(name)+"\"\r\nContent-Type: "+mime+"\r\n\r\n").getBytes(StandardCharsets.UTF_8));out.write(data,0,len);out.write("\r\n".getBytes(StandardCharsets.UTF_8));out.write(("--"+boundary+"--\r\n").getBytes(StandardCharsets.UTF_8));
     }
-    int code=c.getResponseCode();if(code<200||code>=300)throw new IOException("Cloudinary "+code);c.disconnect();
+    int code=c.getResponseCode();
+    if(code<200||code>=300){String detail="";try{detail=read(c.getErrorStream());}catch(Exception ignored){}throw new IOException("Cloudinary "+code+(detail.isEmpty()?"":" — "+detail));}
+    String response=read(c.getInputStream());
+    if(done && (response==null || response.trim().isEmpty())) throw new IOException("Cloudinary returned an empty completion response");
+    c.disconnect();
   }
   private void field(OutputStream out,String b,String k,String v)throws Exception{out.write(("--"+b+"\r\nContent-Disposition: form-data; name=\""+k+"\"\r\n\r\n"+v+"\r\n").getBytes(StandardCharsets.UTF_8));}
   private String safe(String s){return s.replace("\"","_").replace("\r","").replace("\n","");}
