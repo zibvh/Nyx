@@ -3,7 +3,7 @@ const path=require('path');
 const root=path.resolve('android');
 const pkg=path.join(root,'app','src','main','java','app','nyxvault');
 fs.mkdirSync(pkg,{recursive:true});
-for(const f of ['NyxVaultPlugin.java','NyxUploadWorker.java','CloudinaryConfig.java','NyxMediaViewerActivity.java']) fs.copyFileSync(path.join('android-template','app','src','main','java','app','nyxvault',f),path.join(pkg,f));
+for(const f of ['NyxVaultPlugin.java','NyxMediaViewerActivity.java']) fs.copyFileSync(path.join('android-template','app','src','main','java','app','nyxvault',f),path.join(pkg,f));
 function findMain(dir){
   for(const n of fs.readdirSync(dir,{withFileTypes:true})){
     const p=path.join(dir,n.name);
@@ -54,8 +54,7 @@ if(!m.includes('androidx.core.content.FileProvider')){
 const gradle=path.join(root,'app','build.gradle');
 let g=fs.readFileSync(gradle,'utf8');
 if(!g.includes('androidx.biometric:biometric')){
-  g=g.replace(/dependencies \{/,`dependencies {\n    implementation 'androidx.biometric:biometric:1.1.0'\n    implementation 'androidx.work:work-runtime:2.10.1'
-    implementation 'androidx.media3:media3-exoplayer:1.5.1'
+  g=g.replace(/dependencies \{/,`dependencies {\n    implementation 'androidx.biometric:biometric:1.1.0'\n    implementation 'androidx.media3:media3-exoplayer:1.5.1'
     implementation 'androidx.media3:media3-ui:1.5.1'`);
 }
 // v26 intentionally builds DEBUG only. No release signing or keystore configuration.

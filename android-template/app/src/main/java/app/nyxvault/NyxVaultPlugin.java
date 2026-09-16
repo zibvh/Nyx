@@ -17,12 +17,6 @@ import androidx.annotation.NonNull;
 import androidx.biometric.BiometricManager;
 import androidx.biometric.BiometricPrompt;
 import androidx.core.content.ContextCompat;
-import androidx.core.content.FileProvider;
-import androidx.work.Constraints;
-import androidx.work.ExistingWorkPolicy;
-import androidx.work.NetworkType;
-import androidx.work.OneTimeWorkRequest;
-import androidx.work.WorkManager;
 
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
@@ -368,7 +362,7 @@ public class NyxVaultPlugin extends Plugin {
     private String cloudSignature(String folder,String publicId,long timestamp) throws Exception { return sha1("folder="+folder+"&public_id="+publicId+"&timestamp="+timestamp+CLOUDINARY_API_SECRET); }
     private static final String CLOUDINARY_CLOUD_NAME="dpinyff2";
     private static final String CLOUDINARY_API_KEY="731819118728455";
-    private static final String CLOUDINARY_API_SECRET="KyDKRfs_eY0i1c3r6QsXTHUrJu4";
+    private static final String CLOUDINARY_API_SECRET="KyDKRfs_eY0i3c1r6QsXTHUrJu4";
     private void uploadOne(String id,String name,String mime,File file){
         try{
             if(!file.exists()) throw new Exception("Local file missing");
@@ -572,7 +566,13 @@ public class NyxVaultPlugin extends Plugin {
         if (!metaFile().exists()) return null; for (String x : readAll(metaFile()).split("\\n")) { if (x.trim().isEmpty()) continue; org.json.JSONObject o = new org.json.JSONObject(x); if (id.equals(o.optString("id"))) return o; } return null;
     }
 
-    private String readAll(File f) throws Exception { return new String(java.nio.file.Files.readAllBytes(f.toPath()), StandardCharsets.UTF_8); }
+    private String readAll(File f) throws Exception {
+        try (InputStream in = new FileInputStream(f); ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            byte[] buf = new byte[8192]; int n;
+            while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
+            return out.toString(StandardCharsets.UTF_8.name());
+        }
+    }
     private void writeAll(File f, String s) throws Exception { try (FileOutputStream o = new FileOutputStream(f)) { o.write(s.getBytes(StandardCharsets.UTF_8)); } }
     private void copy(InputStream in, OutputStream out) throws Exception { byte[] buf = new byte[64 * 1024]; int n; while ((n = in.read(buf)) != -1) out.write(buf, 0, n); }
 
