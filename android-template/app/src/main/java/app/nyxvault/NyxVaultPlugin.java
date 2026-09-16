@@ -377,7 +377,7 @@ public class NyxVaultPlugin extends Plugin {
             String folder="nyx-vault"; long ts=System.currentTimeMillis()/1000L; String publicId=id;
             String sig=cloudSignature(folder,publicId,ts);
             long size=file.length();
-            if(size > 90L*1024L*1024L) uploadLarge(id,file,resource,folder,publicId,ts,sig,size);
+            if(size > 100L*1024L*1024L) uploadLarge(id,file,resource,folder,publicId,ts,sig,size);
             else uploadMultipart(id,file,resource,folder,publicId,ts,sig,size);
         }catch(Exception e){setUploadStatus(id,"failed",0,e.getMessage()==null?"Cloudinary upload failed":e.getMessage());}
     }
@@ -394,12 +394,55 @@ public class NyxVaultPlugin extends Plugin {
         int code=c.getResponseCode();String response=read(c);if(code<200||code>=300)throw new Exception("Cloudinary HTTP "+code+" — "+response);org.json.JSONObject j=new org.json.JSONObject(response);if(j.optString("public_id").isEmpty())throw new Exception("Cloudinary returned no public_id");markUploaded(id,j.optString("public_id"),j.optString("secure_url"));setUploadStatus(id,"uploaded",100,"Cloudinary upload complete");
     }
     private void uploadLarge(String id,File file,String resource,String folder,String publicId,long ts,String sig,long size)throws Exception{
-        String endpoint="https://api.cloudinary.com/v1_1/"+CLOUDINARY_CLOUD_NAME+"/"+resource+"/upload";String uploadId=UUID.randomUUID().toString();long offset=0;final int chunk=20*1024*1024;
-        while(offset<size){long end=Math.min(size,offset+chunk)-1;int len=(int)(end-offset+1);HttpURLConnection c=(HttpURLConnection)new URL(endpoint).openConnection();c.setDoOutput(true);c.setRequestMethod("POST");c.setConnectTimeout(20000);c.setReadTimeout(180000);c.setRequestProperty("Content-Type","application/octet-stream");c.setRequestProperty("X-Unique-Upload-Id",uploadId);c.setRequestProperty("Content-Range","bytes "+offset+"-"+end+"/"+size);c.setRequestProperty("Content-Length",Integer.toString(len));
-            try(OutputStream out=c.getOutputStream();InputStream in=new FileInputStream(file)){in.skip(offset);byte[]buf=new byte[128*1024];int left=len,n;while(left>0&&(n=in.read(buf,0,Math.min(buf.length,left)))!=-1){out.write(buf,0,n);left-=n;}}
-            int code=c.getResponseCode();String response=read(c);if(code<200||code>=300)throw new Exception("Cloudinary chunk HTTP "+code+" — "+response);offset=end+1;setUploadStatus(id,"uploading",(int)((offset*100)/size),"Uploading large file");if(offset>=size){org.json.JSONObject j=new org.json.JSONObject(response);markUploaded(id,j.optString("public_id",publicId),j.optString("secure_url",""));setUploadStatus(id,"uploaded",100,"Cloudinary upload complete");}}
+        String endpoint="https://api.cloudinary.com/v1_1/"+CLOUDINARY_CLOUD_NAME+"/"+resource+"/upload";
+        String uploadId=UUID.randomUUID().toString();
+        long offset=0; final int chunk=20*1024*1024;
+        while(offset<size){
+            long end=Math.min(size,offset+chunk)-1; int len=(int)(end-offset+1);
+            HttpURLConnection c=(HttpURLConnection)new URL(endpoint).openConnection();
+            c.setDoOutput(true); c.setRequestMethod("POST"); c.setConnectTimeout(20000); c.setReadTimeout(180000);
+            String boundary="----NYXLARGE"+UUID.randomUUID().toString().replace("-","");
+            c.setRequestProperty("Content-Type","multipart/form-data; boundary="+boundary);
+            c.setRequestProperty("X-Unique-Upload-Id",uploadId);
+            c.setRequestProperty("Content-Range","bytes "+offset+"-"+end+"/"+size);
+            c.setChunkedStreamingMode(128*1024);
+            try(OutputStream out=c.getOutputStream()){
+                writeField(out,boundary,"api_key",CLOUDINARY_API_KEY);
+                writeField(out,boundary,"timestamp",Long.toString(ts));
+                writeField(out,boundary,"signature",sig);
+                writeField(out,boundary,"folder",folder);
+                writeField(out,boundary,"public_id",publicId);
+                out.write(("--"+boundary+"\r\nContent-Disposition: form-data; name=\"file\"; filename=\""+sanitizeName(file.getName())+"\"\r\nContent-Type: application/octet-stream\r\n\r\n").getBytes(StandardCharsets.UTF_8));
+                try(InputStream in=new FileInputStream(file)){
+                    long skipped=0; while(skipped<offset){long n=in.skip(offset-skipped); if(n<=0)break; skipped+=n;}
+                    if(skipped!=offset)throw new Exception("Could not seek to upload chunk");
+                    byte[]buf=new byte[128*1024]; int left=len,n; while(left>0&&(n=in.read(buf,0,Math.min(buf.length,left)))!=-1){out.write(buf,0,n);left-=n;}
+                    if(left!=0)throw new Exception("Could not read complete upload chunk");
+                }
+                out.write(("\r\n--"+boundary+"--\r\n").getBytes(StandardCharsets.UTF_8));
+            }
+            int code=c.getResponseCode(); String response=read(c);
+            if(code<200||code>=300)throw new Exception("Cloudinary chunk HTTP "+code+" — "+response);
+            offset=end+1;
+            setUploadStatus(id,"uploading",(int)Math.min(99,(offset*100)/Math.max(1,size)),"Uploading large file");
+            if(offset>=size){
+                org.json.JSONObject j=new org.json.JSONObject(response);
+                String returnedId=j.optString("public_id");
+                if(returnedId.isEmpty())throw new Exception("Cloudinary returned no public_id for large upload");
+                markUploaded(id,returnedId,j.optString("secure_url",""));
+                setUploadStatus(id,"uploaded",100,"Cloudinary upload complete");
+            }
+        }
     }
-    private String read(HttpURLConnection c)throws Exception{InputStream in;try{in=c.getInputStream();}catch(Exception e){in=c.getErrorStream();}if(in==null)return "";try(InputStream x=in){return new String(x.readAllBytes(),StandardCharsets.UTF_8);}}
+    private String read(HttpURLConnection c)throws Exception{
+        InputStream in;
+        try{in=c.getInputStream();}catch(Exception e){in=c.getErrorStream();}
+        if(in==null)return "";
+        try(InputStream x=in; java.io.ByteArrayOutputStream out=new java.io.ByteArrayOutputStream()){
+            byte[]buf=new byte[8192]; int n; while((n=x.read(buf))!=-1)out.write(buf,0,n);
+            return out.toString(StandardCharsets.UTF_8.name());
+        }
+    }
 
     @PluginMethod
     public void getUploadStatus(PluginCall call) {
@@ -430,7 +473,24 @@ public class NyxVaultPlugin extends Plugin {
     }
 
     @PluginMethod
-    public void retryUploads(PluginCall call) { JSObject ret=new JSObject(); ret.put("ok",true); ret.put("disabled",true); call.resolve(ret); }
+    public void retryUploads(PluginCall call) {
+        int queued=0;
+        try {
+            if(metaFile().exists()){
+                for(String line:readAll(metaFile()).split("\n")){
+                    if(line.trim().isEmpty())continue;
+                    org.json.JSONObject o=new org.json.JSONObject(line);
+                    if(o.optBoolean("uploaded",false))continue;
+                    String id=o.optString("id"), path=o.optString("path"), name=o.optString("name","media"), mime=o.optString("mime","application/octet-stream");
+                    File f=new File(path);
+                    if(id.isEmpty()||!f.exists())continue;
+                    final String fid=id, fname=name, fmime=mime; final File ff=f;
+                    IO_EXECUTOR.execute(()->uploadOne(fid,fname,fmime,ff)); queued++;
+                }
+            }
+        }catch(Exception e){ call.reject("Could not retry uploads: "+e.getMessage()); return; }
+        JSObject ret=new JSObject(); ret.put("ok",true); ret.put("queued",queued); call.resolve(ret);
+    }
 
     @PluginMethod
     public void listMedia(PluginCall call) {

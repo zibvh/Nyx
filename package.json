@@ -1,6 +1,6 @@
 {
   "name": "nyx",
-  "version": "0.9.51",
+  "version": "0.9.53",
   "private": true,
   "scripts": {
     "build": "echo NYX web build ready",
