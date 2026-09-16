@@ -61,12 +61,27 @@ if(r?.ok){ e.target.reset(); triggerSecret(title); return; }
 };
 $("#settingsBtn").onclick=()=>state.setup?show("#settingsView"):show("#setupView");$("#backBtn").onclick=()=>show("#notesView");$("#saveName").onclick=()=>{state.displayName=$("#displayName").value.trim()||"Notes";save();$("#visibleTitle").textContent=state.displayName;show("#notesView")};
 document.querySelectorAll("[data-recovery]").forEach(b=>b.onclick=()=>{selectedRecovery=b.dataset.recovery;document.querySelectorAll("[data-recovery]").forEach(x=>x.classList.remove("selected"));b.classList.add("selected")});
-$("#finishSetup").onclick=async()=>{const secret=$("#secretName").value.trim(),pin=$("#pin").value.trim();if(!secret||!/^[0-9]{6}$/.test(pin)||!selectedRecovery){$("#setupMsg").textContent="Fill in the secret, 6-digit PIN and recovery choice.";return}
-Native=await waitForNative();
-if(Native?.addListener){Native.addListener("deleteStatus",e=>{if(e?.manualDeleteRequired){alert("Original still exists. Your media is safely stored in NYX. Delete the original manually from Gallery/Files to complete the move.");}}).catch(()=>{});}
-if(!Native){$("#setupMsg").textContent="NYX private storage could not start. Please close and reopen the app.";return}try{await Native.saveCredential({secret,pin,removeOriginal:$("#removeOriginalSetup").checked});
-state.recovery=selectedRecovery;state.setup=true;save();$("#setupMsg").textContent="Private setup complete.";show("#notesView")}catch(e){
-$("#setupMsg").textContent=e?.message||"Could not save private setup."}};
+let setupBusy=false;
+function setSetupBusy(busy,message){setupBusy=busy;const btn=$("#finishSetup");if(!btn)return;btn.disabled=busy;btn.classList.toggle("is-loading",busy);btn.innerHTML=busy?`<span class="btn-spinner" aria-hidden="true"></span><span>${message||"Setting up private storage…"}</span>`:`Finish private setup`;btn.setAttribute("aria-busy",busy?"true":"false")}
+$("#finishSetup").onclick=async()=>{
+ if(setupBusy)return;
+ const secret=$("#secretName").value.trim(),pin=$("#pin").value.trim();
+ $("#setupMsg").className="setup-status muted";
+ if(!secret||!/^\d{6}$/.test(pin)||!selectedRecovery){$("#setupMsg").textContent="Complete the secret name, 6-digit PIN and recovery choice first.";$("#setupMsg").classList.add("setup-error");return}
+ setSetupBusy(true,"Starting private setup…");$("#setupMsg").textContent="Preparing secure storage. Please wait…";
+ try{
+   Native=await waitForNative(8000);
+   if(!Native)throw new Error("NYX private storage could not start. Close and reopen the app, then try again.");
+   if(Native?.addListener){Native.addListener("deleteStatus",e=>{if(e?.manualDeleteRequired){alert("Original still exists. Your media is safely stored in NYX. Delete the original manually from Gallery/Files to complete the move.");}}).catch(()=>{});}
+   $("#setupMsg").textContent="Creating encrypted private storage…";
+   await Promise.race([Native.saveCredential({secret,pin,removeOriginal:$("#removeOriginalSetup").checked}),new Promise((_,reject)=>setTimeout(()=>reject(new Error("Private setup is taking too long. Please try again.")),15000))]);
+   state.recovery=selectedRecovery;state.setup=true;save();
+   $("#setupMsg").textContent="Private setup complete. Opening Notes…";$("#setupMsg").classList.add("setup-success");
+   setTimeout(()=>show("#notesView"),500);
+ }catch(e){
+   $("#setupMsg").textContent=e?.message||"Could not finish private setup. Try again.";$("#setupMsg").classList.add("setup-error");
+ }finally{setSetupBusy(false)}
+};
 function triggerSecret(secret){
 if(!state.setup||!Native)return;
   Native.verifySecret({secret}).then(r=>{
