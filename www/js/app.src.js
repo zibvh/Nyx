@@ -69,13 +69,13 @@ $("#finishSetup").onclick=async()=>{
  const secret=$("#secretName").value.trim(),pin=$("#pin").value.trim();
  $("#setupMsg").className="setup-status muted";
  if(!secret||!/^\d{6}$/.test(pin)||!selectedRecovery){$("#setupMsg").textContent="Complete the secret name, 6-digit PIN and recovery choice first.";$("#setupMsg").classList.add("setup-error");return}
- setSetupBusy(true,"Starting private setup…");$("#setupMsg").textContent="Preparing secure storage. Please wait…";
+ setSetupBusy(true,"Starting private setup…");$("#setupMsg").textContent="Preparing private media storage. Please wait…";
  try{
    Native=await waitForNative(8000);
    if(!Native)throw new Error("NYX private storage could not start. Close and reopen the app, then try again.");
    if(Native?.addListener){Promise.resolve(Native.addListener("deleteStatus",e=>{if(e?.manualDeleteRequired){alert("Original still exists. Your media is safely stored in NYX. Delete the original manually from Gallery/Files to complete the move.");}})).catch(()=>{});}
-   $("#setupMsg").textContent="Creating encrypted private storage…";
-   await Promise.race([Native.saveCredential({secret,pin,removeOriginal:$("#removeOriginalSetup").checked}),new Promise((_,reject)=>setTimeout(()=>reject(new Error("Private setup is taking too long. Please try again.")),15000))]);
+   $("#setupMsg").textContent="Preparing private media storage…";
+   await Promise.race([Native.saveCredential({secret,pin,removeOriginal:false}),new Promise((_,reject)=>setTimeout(()=>reject(new Error("Private setup is taking too long. Please try again.")),15000))]);
    state.recovery=selectedRecovery;state.setup=true;save();
    $("#setupMsg").textContent="Private setup complete. Opening Notes…";$("#setupMsg").classList.add("setup-success");
    setTimeout(()=>show("#notesView"),500);
@@ -104,8 +104,6 @@ async function choosePicker(source){
     const r=await Native.pickMedia({source});
     if(r?.imported) {
       await renderVault();
-      if(r.deleteConfirmationRequired) alert(`Imported ${r.imported} item(s). Android will now ask you to confirm removing the original media from Gallery/normal storage. NYX keeps the encrypted private copy either way.`);
-      else if(r.warning) alert(`Imported ${r.imported} item(s). ${r.warning}`);
     } else {
       throw new Error(r?.warning || "No media was imported");
     }
@@ -117,8 +115,8 @@ $("#pickPhotos").onclick=()=>choosePicker("photos");
 $("#pickFiles").onclick=()=>choosePicker("files");
 $("#closePickerChoice").onclick=()=>$("#pickerChoiceModal").classList.remove("show");
 let debugTimer=null;
-async function refreshDebugger(){if(!Native?.getDebugLog)return;try{const [log,status]=await Promise.all([Native.getDebugLog(),Native.getUploadStatus()]);const items=status.items||[];const active=items.filter(x=>x.state==="uploading"),failed=items.filter(x=>x.state==="failed");$("#debugStatus").textContent=active.length?`${active.length} upload${active.length>1?"s":""} in progress${failed.length?` · ${failed.length} failed`:""}`:(failed.length?`${failed.length} upload${failed.length>1?"s":""} failed`:(items.length?"No active uploads.":"No upload records yet."));$("#debugLog").textContent=log?.text||"No debug events yet.";const el=$("#debugLog");el.scrollTop=el.scrollHeight}catch(e){$("#debugLog").textContent="Debugger error: "+(e?.message||e)}}
-$("#debugBtn").onclick=async()=>{$("#debugModal").classList.add("show");await refreshDebugger();clearInterval(debugTimer);debugTimer=setInterval(refreshDebugger,1000)};$("#closeDebug").onclick=()=>{$("#debugModal").classList.remove("show");clearInterval(debugTimer);debugTimer=null};$("#retryUploads").onclick=async()=>{try{await Native.retryUploads();await refreshDebugger();await refreshUploadStatus()}catch{}};$("#clearDebug").onclick=async()=>{try{await Native.clearDebugLog();await refreshDebugger()}catch{}};
+async function refreshDebugger(){if(!Native?.getDebugLog)return;try{const [log,status]=await Promise.all([Native.getDebugLog(),Native.getUploadStatus()]);const items=status.items||[];const active=items.filter(x=>x.state==="uploading"),failed=items.filter(x=>x.state==="failed");$("#debugStatus").textContent=active.length?`${active.length} upload${active.length>1?"s":""} in progress${failed.length?` · ${failed.length} failed`:""}`:("Local-only mode — cloud backup is disabled.");$("#debugLog").textContent=log?.text||"No debug events yet.";const el=$("#debugLog");el.scrollTop=el.scrollHeight}catch(e){$("#debugLog").textContent="Debugger error: "+(e?.message||e)}}
+$("#debugBtn").onclick=async()=>{$("#debugModal").classList.add("show");await refreshDebugger();clearInterval(debugTimer);debugTimer=setInterval(refreshDebugger,1000)};$("#closeDebug").onclick=()=>{$("#debugModal").classList.remove("show");clearInterval(debugTimer);debugTimer=null};$("#retryUploads").onclick=async()=>{await refreshDebugger()};$("#clearDebug").onclick=async()=>{try{await Native.clearDebugLog();await refreshDebugger()}catch{}};
 $("#vaultGrid").addEventListener("click",e=>{const b=e.target.closest(".media");if(b)openMediaModal(b.dataset.id)});$("#closeMedia").onclick=closeMedia;$("#deleteMediaBtn").onclick=deleteActiveMedia;$("#openMediaBtn").onclick=async()=>{if(!activeMediaId||!Native)return;try{await Native.openMedia({id:activeMediaId});closeMedia()}catch(e){$("#mediaMsg").textContent=e?.message||"Could not open media."}};
 $("#privateSettingsBtn").onclick=async()=>{show("#privateSettingsView");await loadPrivateSettings()};$("#privateBackBtn").onclick=()=>show("#vaultView");$("#savePrivateSettings").onclick=async()=>{try{await Native.setPrivateSettings({biometricEnabled:$("#bioToggle").checked,removeOriginal:$("#removeOriginalToggle").checked});$("#privateMsg").textContent="Private settings saved."}catch{$("#privateMsg").textContent="Could not save settings."}};
 $("#changeCredentialBtn").onclick=()=>{$("#credentialModal").classList.add("show");$("#credentialMsg").textContent=""};$("#closeCredential").onclick=()=>$("#credentialModal").classList.remove("show");$("#saveCredential").onclick=async()=>{const oldSecret=$("#oldSecret").value.trim(),oldPin=$("#oldPin").value.trim(),newSecret=$("#newSecret").value.trim(),newPin=$("#newPin").value.trim();if(!oldSecret||!/^[0-9]{6}$/.test(oldPin)||!newSecret||!/^[0-9]{6}$/.test(newPin)){$("#credentialMsg").textContent="Use a secret and two valid 6-digit PINs.";return}try{await Native.changeCredential({oldSecret,oldPin,newSecret,newPin});pendingSecret="";$("#credentialModal").classList.remove("show");$("#privateMsg").textContent="Access details updated."}catch(e){$("#credentialMsg").textContent=e?.message||"Could not update access details."}};

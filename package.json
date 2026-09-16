@@ -1,6 +1,6 @@
 {
   "name": "nyx",
-  "version": "0.9.48",
+  "version": "0.9.50",
   "private": true,
   "scripts": {
     "build": "echo NYX web build ready",
@@ -10,7 +10,7 @@
   "dependencies": {
     "@capacitor/android": "7.4.0",
     "@capacitor/core": "7.4.0",
-    "@capacitor/app": "7.1.2"
+    "@capacitor/app": "7.4.0"
   },
   "devDependencies": {
     "@capacitor/cli": "7.4.0",

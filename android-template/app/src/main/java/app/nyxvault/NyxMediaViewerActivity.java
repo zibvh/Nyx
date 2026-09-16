@@ -36,8 +36,6 @@ import javax.crypto.spec.GCMParameterSpec;
 public class NyxMediaViewerActivity extends Activity {
     private static final String ROOT = "nyx-media";
     private static final String META = "nyx-media.json";
-    private static final String KEY_ALIAS = "nyx_media_aes_key_v2";
-    private static final int GCM_TAG_BITS = 128;
     private File temp;
     private VideoView video;
     private MediaPlayer audioPlayer;
@@ -59,7 +57,6 @@ public class NyxMediaViewerActivity extends Activity {
 
     @Override public void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
         getWindow().setStatusBarColor(Color.rgb(9,9,9)); getWindow().setNavigationBarColor(Color.rgb(9,9,9));
         String id=getIntent().getStringExtra("media_id"); if(id==null||id.isEmpty()){finish();return;}
         try{render(id);}catch(Exception e){showError(e.getMessage());}
@@ -82,7 +79,7 @@ public class NyxMediaViewerActivity extends Activity {
         stage.animate().alpha(1f).setDuration(120).start();
         new Thread(() -> {
             File decrypted=null; Exception error=null;
-            try { decrypted=decryptToCache(id,"nyx_view_"+id+System.currentTimeMillis()+suffix(name,mime)); } catch(Exception e){error=e;}
+            try { decrypted=mediaFile(meta); } catch(Exception e){error=e;}
             File ready=decrypted; Exception err=error;
             runOnUiThread(() -> {
                 if(isFinishing()){if(ready!=null)ready.delete();return;}
@@ -112,8 +109,6 @@ public class NyxMediaViewerActivity extends Activity {
     private String human(long b){if(b<1024)return b+" B";if(b<1048576)return (b/1024)+" KB";return String.format(java.util.Locale.US,"%.1f MB",b/1048576.0);}
     private void showError(String message){LinearLayout r=new LinearLayout(this);r.setOrientation(LinearLayout.VERTICAL);r.setGravity(Gravity.CENTER);r.setPadding(dp(30),dp(30),dp(30),dp(30));r.setBackgroundColor(Color.rgb(9,9,9));TextView t=text(message==null?"Could not open media":message,15,Color.LTGRAY);t.setGravity(Gravity.CENTER);r.addView(t,new LinearLayout.LayoutParams(-1,-2));Button b=action("Close");b.setOnClickListener(v->finish());r.addView(b,new LinearLayout.LayoutParams(-1,dp(48)));setContentView(r);}
     private org.json.JSONObject findMeta(String id)throws Exception{File f=new File(new File(getFilesDir(),ROOT),META);if(!f.exists())return null;String s=new String(java.nio.file.Files.readAllBytes(f.toPath()),StandardCharsets.UTF_8);for(String x:s.split("\\n")){if(x.trim().isEmpty())continue;org.json.JSONObject o=new org.json.JSONObject(x);if(id.equals(o.optString("id")))return o;}return null;}
-    private SecretKey key()throws Exception{KeyStore ks=KeyStore.getInstance("AndroidKeyStore");ks.load(null);return ((KeyStore.SecretKeyEntry)ks.getEntry(KEY_ALIAS,null)).getSecretKey();}
-    private File decryptToCache(String id,String filename)throws Exception{File enc=new File(new File(getFilesDir(),ROOT),id+".nyx");if(!enc.exists())throw new Exception("Encrypted media is missing");File out=new File(getCacheDir(),filename);try(FileInputStream fis=new FileInputStream(enc)){byte[]iv=new byte[12];if(fis.read(iv)!=12)throw new Exception("Invalid encrypted media");Cipher c=Cipher.getInstance("AES/GCM/NoPadding");c.init(Cipher.DECRYPT_MODE,key(),new GCMParameterSpec(GCM_TAG_BITS,iv));try(CipherInputStream cis=new CipherInputStream(fis,c);FileOutputStream fos=new FileOutputStream(out)){byte[]buf=new byte[64*1024];int n;while((n=cis.read(buf))!=-1)fos.write(buf,0,n);}}return out;}
-    private String suffix(String name,String mime){if(name!=null){int d=name.lastIndexOf('.');if(d>0&&d<name.length()-1){String x=name.substring(d).replaceAll("[^A-Za-z0-9.]","");if(x.length()<=10)return x;}}if(mime.equals("image/jpeg"))return ".jpg";if(mime.equals("image/png"))return ".png";if(mime.equals("image/webp"))return ".webp";if(mime.equals("image/gif"))return ".gif";if(mime.equals("video/mp4"))return ".mp4";if(mime.equals("video/webm"))return ".webm";if(mime.equals("video/3gpp"))return ".3gp";if(mime.equals("video/quicktime"))return ".mov";if(mime.equals("audio/mpeg"))return ".mp3";if(mime.equals("audio/mp4"))return ".m4a";if(mime.equals("audio/wav"))return ".wav";return ".bin";}
-    @Override protected void onDestroy(){if(video!=null){video.stopPlayback();video=null;}if(audioPlayer!=null){try{if(audioPlayer.isPlaying())audioPlayer.stop();}catch(Exception ignored){}audioPlayer.release();audioPlayer=null;}if(temp!=null&&temp.exists())temp.delete();super.onDestroy();}
+    private File mediaFile(org.json.JSONObject meta)throws Exception{String path=meta.optString("path","");if(!path.isEmpty()){File f=new File(path);if(f.exists())return f;}throw new Exception("Media file is missing");}
+    @Override protected void onDestroy(){if(video!=null){video.stopPlayback();video=null;}if(audioPlayer!=null){try{if(audioPlayer.isPlaying())audioPlayer.stop();}catch(Exception ignored){}audioPlayer.release();audioPlayer=null;}/* media is stored directly in NYX and is not a temporary file */super.onDestroy();}
 }

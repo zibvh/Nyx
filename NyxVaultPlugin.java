@@ -73,7 +73,7 @@ public class NyxVaultPlugin extends Plugin {
     private static final int GCM_TAG_BITS = 128;
     private static final int PICK_CODE = 7137;
 
-    private File root() { File d = new File(getContext().getFilesDir(), ROOT); if (!d.exists()) d.mkdirs(); return d; }
+    private File root() { File d = new File(getContext().getExternalFilesDir(null), "NYX"); if (!d.exists()) d.mkdirs(); ensureNyxNoMediaMarker(); return d; }
     private File metaFile() { return new File(root(), META); }
     private android.content.SharedPreferences prefs() { return getContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE); }
 
@@ -97,9 +97,9 @@ public class NyxVaultPlugin extends Plugin {
                     .putString("verifier", verifier)
                     .putString("secretVerifier", secretVerifier)
                     .putBoolean("biometricEnabled", false)
-                    .putBoolean("removeOriginal", call.getBoolean("removeOriginal", true))
+                    .putBoolean("removeOriginal", false)
                     .apply();
-            key();
+            ensureNyxNoMediaMarker();
             call.resolve();
         } catch (Exception e) { call.reject("Credential setup failed"); }
     }
@@ -152,14 +152,7 @@ public class NyxVaultPlugin extends Plugin {
     }
 
     @PluginMethod
-    public void setSecureScreen(PluginCall call) {
-        boolean enabled = call.getBoolean("enabled", false);
-        getActivity().runOnUiThread(() -> {
-            if (enabled) getActivity().getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
-            else getActivity().getWindow().clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
-        });
-        call.resolve();
-    }
+    public void setSecureScreen(PluginCall call) { call.resolve(); }
 
     @PluginMethod
     public void clearTempCache(PluginCall call) {
@@ -177,7 +170,7 @@ public class NyxVaultPlugin extends Plugin {
         int can = BiometricManager.from(getContext()).canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_WEAK);
         ret.put("biometricAvailable", can == BiometricManager.BIOMETRIC_SUCCESS);
         ret.put("biometricEnabled", prefs().getBoolean("biometricEnabled", false));
-        ret.put("removeOriginal", prefs().getBoolean("removeOriginal", true));
+        ret.put("removeOriginal", false);
         call.resolve(ret);
     }
 
@@ -185,7 +178,7 @@ public class NyxVaultPlugin extends Plugin {
     public void setPrivateSettings(PluginCall call) {
         prefs().edit()
                 .putBoolean("biometricEnabled", call.getBoolean("biometricEnabled", false))
-                .putBoolean("removeOriginal", call.getBoolean("removeOriginal", true))
+                .putBoolean("removeOriginal", false)
                 .apply();
         call.resolve();
     }
@@ -217,7 +210,7 @@ public class NyxVaultPlugin extends Plugin {
             // deletion flow when the selected item belongs to the device gallery.
             i = new Intent(Intent.ACTION_GET_CONTENT);
             i.setType("*/*");
-            i.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"image/*", "video/*"});
+            i.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"image/*", "video/*", "audio/*"});
             i.addCategory(Intent.CATEGORY_OPENABLE);
             i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
@@ -225,7 +218,7 @@ public class NyxVaultPlugin extends Plugin {
             // Android Files/document picker. Multiple image/video files are supported.
             i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
             i.setType("*/*");
-            i.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"image/*", "video/*"});
+            i.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"image/*", "video/*", "audio/*"});
             i.addCategory(Intent.CATEGORY_OPENABLE);
             i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
             i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
@@ -285,24 +278,21 @@ public class NyxVaultPlugin extends Plugin {
     }
 
     private void saveUri(Uri uri) throws Exception {
-        String name = queryName(uri), mime = getContext().getContentResolver().getType(uri);
-        if (mime == null) mime = "application/octet-stream";
-        String id = System.currentTimeMillis() + "_" + Math.abs(new SecureRandom().nextInt());
-        File out = new File(root(), id + ".nyx");
-        byte[] iv = new byte[12]; new SecureRandom().nextBytes(iv);
-        long copied = 0;
-        try (InputStream in = getContext().getContentResolver().openInputStream(uri); FileOutputStream fos = new FileOutputStream(out)) {
-            if (in == null) throw new Exception("No input");
-            fos.write(iv);
-            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding"); cipher.init(Cipher.ENCRYPT_MODE, key(), new GCMParameterSpec(GCM_TAG_BITS, iv));
-            try (CipherOutputStream cos = new CipherOutputStream(fos, cipher)) {
-                byte[] buf = new byte[64 * 1024]; int n; while ((n = in.read(buf)) != -1) { cos.write(buf, 0, n); copied += n; }
-            }
+        String name=queryName(uri), mime=getContext().getContentResolver().getType(uri);
+        if(mime==null)mime="application/octet-stream";
+        String id=System.currentTimeMillis()+"_"+Math.abs(new SecureRandom().nextInt());
+        String clean=name==null?"media":name.replaceAll("[^A-Za-z0-9._-]","_");
+        if(clean.isEmpty())clean="media";
+        File out=new File(root(),id+"_"+clean);
+        long copied=0;
+        try(InputStream in=getContext().getContentResolver().openInputStream(uri);FileOutputStream fos=new FileOutputStream(out)){
+            if(in==null)throw new Exception("No input");
+            byte[]buf=new byte[64*1024];int n;while((n=in.read(buf))!=-1){fos.write(buf,0,n);copied+=n;}
         }
-        long expected = querySize(uri);
-        if (expected >= 0 && expected != copied) { out.delete(); throw new Exception("Size verification failed"); }
+        long expected=querySize(uri);if(expected>=0&&expected!=copied){out.delete();throw new Exception("Size verification failed");}
         ensureNyxNoMediaMarker();
-        appendMeta(id, name, mime, copied, false, mime.startsWith("video/") ? "video" : "image", uri.toString(), false);
+        String resource=mime.startsWith("video/")?"video":(mime.startsWith("audio/")?"video":"image");
+        appendMeta(id,name,mime,copied,false,resource,uri.toString(),false,out.getAbsolutePath());
     }
 
     private long querySize(Uri uri) {
@@ -383,33 +373,19 @@ public class NyxVaultPlugin extends Plugin {
 
     @PluginMethod
     public void listMedia(PluginCall call) {
-        // Listing media is a cheap read. Do not enqueue an upload worker here;
-        // repeated renders would otherwise create needless background work.
-        JSObject ret = new JSObject(); org.json.JSONArray arr = new org.json.JSONArray();
-        try { if (metaFile().exists()) { String s = readAll(metaFile()); for (String x : s.split("\\n")) if (!x.trim().isEmpty()) arr.put(new org.json.JSONObject(x)); } } catch (Exception ignored) {}
-        ret.put("items", arr); call.resolve(ret);
+        IO_EXECUTOR.execute(() -> {
+            JSObject ret=new JSObject(); org.json.JSONArray arr=new org.json.JSONArray();
+            try {
+                if(metaFile().exists()){String s=readAll(metaFile());for(String x:s.split("\n")){if(!x.trim().isEmpty())arr.put(new org.json.JSONObject(x));}}
+                ret.put("items",arr);call.resolve(ret);
+            }catch(Exception e){call.reject("Could not list private media");}
+        });
     }
 
     @PluginMethod
     public void getThumbnail(PluginCall call) {
-        String id = call.getString("id", ""); if (id.isEmpty()) { call.reject("Missing id"); return; }
-        IO_EXECUTOR.execute(() -> {
-            File tmp = null;
-            try {
-                org.json.JSONObject target = findMeta(id); if (target == null) throw new Exception();
-                tmp = decryptToCache(id, "nyx_thumb_" + id + "_" + System.currentTimeMillis());
-                Bitmap bmp;
-                if (target.optString("mime").startsWith("video/")) {
-                    if (Build.VERSION.SDK_INT >= 29) bmp = android.media.ThumbnailUtils.createVideoThumbnail(tmp, new Size(640, 640), null);
-                    else { MediaMetadataRetriever mmr = new MediaMetadataRetriever(); mmr.setDataSource(tmp.getAbsolutePath()); bmp = mmr.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC); mmr.release(); }
-                } else bmp = BitmapFactory.decodeFile(tmp.getAbsolutePath());
-                if (bmp == null) throw new Exception("No frame");
-                int max=360; float scale=Math.min(1f,max/(float)Math.max(bmp.getWidth(),bmp.getHeight()));
-                if(scale<1f) bmp=Bitmap.createScaledBitmap(bmp,Math.max(1,(int)(bmp.getWidth()*scale)),Math.max(1,(int)(bmp.getHeight()*scale)),true);
-                ByteArrayOutputStream bos=new ByteArrayOutputStream(); bmp.compress(Bitmap.CompressFormat.JPEG,82,bos); bmp.recycle();
-                JSObject ret=new JSObject(); ret.put("data",Base64.encodeToString(bos.toByteArray(),Base64.NO_WRAP)); ret.put("mime","image/jpeg"); call.resolve(ret);
-            } catch(Exception e){ call.reject("Thumbnail unavailable"); } finally { if(tmp!=null)tmp.delete(); }
-        });
+        String id=call.getString("id","");if(id.isEmpty()){call.reject("Missing id");return;}
+        IO_EXECUTOR.execute(() -> {try{org.json.JSONObject target=findMeta(id);if(target==null)throw new Exception();File file=mediaFile(target);if(file==null||!file.exists())throw new Exception();Bitmap bmp;String mime=target.optString("mime","");if(mime.startsWith("video/")){if(Build.VERSION.SDK_INT>=29)bmp=android.media.ThumbnailUtils.createVideoThumbnail(file,new Size(640,640),null);else{MediaMetadataRetriever mmr=new MediaMetadataRetriever();mmr.setDataSource(file.getAbsolutePath());bmp=mmr.getFrameAtTime(0,MediaMetadataRetriever.OPTION_CLOSEST_SYNC);mmr.release();}}else if(mime.startsWith("image/")){bmp=BitmapFactory.decodeFile(file.getAbsolutePath());}else{throw new Exception();}if(bmp==null)throw new Exception();int max=360;float scale=Math.min(1f,max/(float)Math.max(bmp.getWidth(),bmp.getHeight()));if(scale<1f)bmp=Bitmap.createScaledBitmap(bmp,Math.max(1,(int)(bmp.getWidth()*scale)),Math.max(1,(int)(bmp.getHeight()*scale)),true);ByteArrayOutputStream bos=new ByteArrayOutputStream();bmp.compress(Bitmap.CompressFormat.JPEG,82,bos);bmp.recycle();JSObject ret=new JSObject();ret.put("data",Base64.encodeToString(bos.toByteArray(),Base64.NO_WRAP));ret.put("mime","image/jpeg");call.resolve(ret);}catch(Exception e){call.reject("Thumbnail unavailable");}});
     }
 
     @PluginMethod
@@ -429,48 +405,16 @@ public class NyxVaultPlugin extends Plugin {
 
     @PluginMethod
     public void deleteMedia(PluginCall call) {
-        String id=call.getString("id",""); if(id.isEmpty()){call.reject("Missing id");return;}
-        IO_EXECUTOR.execute(() -> {
-            try {
-                org.json.JSONObject target=findMeta(id); if(target==null){call.reject("Not found");return;}
-                File enc=new File(root(),id+".nyx");
-                if(target.optBoolean("uploaded",false)) deleteCloudCopy(target);
-                if(enc.exists()&&!enc.delete())throw new Exception("Delete failed");
-                List<String> keep=new ArrayList<>();
-                if(metaFile().exists())for(String x:readAll(metaFile()).split("\\n"))if(!x.trim().isEmpty()&&!id.equals(new org.json.JSONObject(x).optString("id")))keep.add(x);
-                writeAll(metaFile(),String.join("\n",keep));
-                call.resolve();
-            }catch(Exception e){call.reject("Could not delete media");}
-        });
+        String id=call.getString("id","");if(id.isEmpty()){call.reject("Missing id");return;}
+        IO_EXECUTOR.execute(() -> {try{org.json.JSONObject target=findMeta(id);if(target==null){call.reject("Not found");return;}File f=mediaFile(target);if(f!=null&&f.exists())f.delete();String legacy=new File(getContext().getFilesDir(),ROOT+File.separator+id+".nyx").getAbsolutePath();File lf=new File(legacy);if(lf.exists())lf.delete();if(target.optBoolean("uploaded",false)&&!target.optString("cloud_public_id","").isEmpty()){try{deleteCloudCopy(target);}catch(Exception e){appendDebug("WARN","Cloud copy was not deleted: "+e.getMessage());}}List<String>keep=new ArrayList<>();if(metaFile().exists())for(String x:readAll(metaFile()).split("\n"))if(!x.trim().isEmpty()&&!id.equals(new org.json.JSONObject(x).optString("id")))keep.add(x);writeAll(metaFile(),String.join("
+",keep));call.resolve();}catch(Exception e){call.reject("Could not delete media");}});
     }
 
     private void deleteCloudCopy(org.json.JSONObject target) throws Exception {
-        String base = CloudinaryConfig.BACKEND_URL.replaceAll("/$", "");
-        if (base.startsWith("https://YOUR-")) throw new Exception("Backend not configured");
-        URL url = new URL(base + "/api/cloudinary/delete");
-        HttpURLConnection c = (HttpURLConnection) url.openConnection();
-        c.setDoOutput(true); c.setRequestMethod("POST"); c.setConnectTimeout(20000); c.setReadTimeout(30000);
-        c.setRequestProperty("Authorization", "Bearer " + CloudinaryConfig.BACKEND_TOKEN);
-        c.setRequestProperty("Content-Type", "application/json");
-        org.json.JSONObject body = new org.json.JSONObject();
-        body.put("public_id", target.optString("cloud_public_id", ""));
-        body.put("resource_type", target.optString("resource_type", "image"));
-        try (OutputStream out = c.getOutputStream()) { out.write(body.toString().getBytes(StandardCharsets.UTF_8)); }
-        int code = c.getResponseCode();
-        if (code < 200 || code >= 300) throw new Exception("Cloud delete " + code);
-        c.disconnect();
-    }
-
-    private File decryptToCache(String id, String prefix) throws Exception {
-        File enc = new File(root(), id + ".nyx"); if (!enc.exists()) throw new Exception("missing");
-        File tmp = new File(getContext().getCacheDir(), prefix);
-        try (FileInputStream fis = new FileInputStream(enc)) {
-            byte[] iv = new byte[12]; if (fis.read(iv) != 12) throw new Exception("bad iv");
-            Cipher c = Cipher.getInstance("AES/GCM/NoPadding"); c.init(Cipher.DECRYPT_MODE, key(), new GCMParameterSpec(GCM_TAG_BITS, iv));
-            try (CipherInputStream cis = new CipherInputStream(fis, c); FileOutputStream fos = new FileOutputStream(tmp)) { copy(cis, fos); }
-        }
-        return tmp;
-    }
+        String publicId=target.optString("cloud_public_id","");if(publicId.isEmpty())return;String resource=target.optString("cloud_resource_type",target.optString("resource_type","image"));long ts=System.currentTimeMillis()/1000;java.util.Map<String,String>p=new java.util.TreeMap<>();p.put("public_id",publicId);p.put("timestamp",String.valueOf(ts));String sig=signCloud(p);URL u=new URL("https://api.cloudinary.com/v1_1/"+CloudinaryConfig.CLOUD_NAME+"/"+resource+"/destroy");HttpURLConnection c=(HttpURLConnection)u.openConnection();c.setDoOutput(true);c.setRequestMethod("POST");c.setConnectTimeout(20000);c.setReadTimeout(30000);c.setRequestProperty("Content-Type","application/x-www-form-urlencoded");String body="public_id="+java.net.URLEncoder.encode(publicId,"UTF-8")+"&timestamp="+ts+"&api_key="+CloudinaryConfig.API_KEY+"&signature="+sig;try(OutputStream o=c.getOutputStream()){o.write(body.getBytes(StandardCharsets.UTF_8));}int code=c.getResponseCode();if(code<200||code>=300)throw new Exception("Cloudinary delete "+code+": "+readStream(c.getErrorStream()));}
+    private String signCloud(java.util.Map<String,String>p)throws Exception{StringBuilder s=new StringBuilder();for(java.util.Map.Entry<String,String>e:p.entrySet()){if(s.length()>0)s.append('&');s.append(e.getKey()).append('=').append(e.getValue());}s.append(CloudinaryConfig.API_SECRET);byte[]d=MessageDigest.getInstance("SHA-1").digest(s.toString().getBytes(StandardCharsets.UTF_8));StringBuilder h=new StringBuilder();for(byte x:d)h.append(String.format(java.util.Locale.US,"%02x",x));return h.toString();}
+    private String readStream(InputStream in)throws Exception{if(in==null)return "";try(java.util.Scanner sc=new java.util.Scanner(in,StandardCharsets.UTF_8.name()).useDelimiter("\A")){return sc.hasNext()?sc.next():"";}}
+    private File mediaFile(org.json.JSONObject meta){String path=meta.optString("path","");if(!path.isEmpty())return new File(path);String id=meta.optString("id","");File f=new File(root(),id+".nyx");return f.exists()?f:null;}
 
     private org.json.JSONObject findMeta(String id) throws Exception {
         if (!metaFile().exists()) return null; for (String x : readAll(metaFile()).split("\\n")) { if (x.trim().isEmpty()) continue; org.json.JSONObject o = new org.json.JSONObject(x); if (id.equals(o.optString("id"))) return o; } return null;
@@ -480,10 +424,10 @@ public class NyxVaultPlugin extends Plugin {
     private void writeAll(File f, String s) throws Exception { try (FileOutputStream o = new FileOutputStream(f)) { o.write(s.getBytes(StandardCharsets.UTF_8)); } }
     private void copy(InputStream in, OutputStream out) throws Exception { byte[] buf = new byte[64 * 1024]; int n; while ((n = in.read(buf)) != -1) out.write(buf, 0, n); }
 
-    private synchronized void appendMeta(String id, String name, String mime, long size, boolean uploaded, String resourceType, String originalUri, boolean originalRemoved) throws Exception {
+    private synchronized void appendMeta(String id, String name, String mime, long size, boolean uploaded, String resourceType, String originalUri, boolean originalRemoved, String path) throws Exception {
         List<String> rows = new ArrayList<>();
         if (metaFile().exists()) { String s = readAll(metaFile()); if (!s.trim().isEmpty()) for (String x : s.split("\\n")) if (!x.trim().isEmpty()) rows.add(x); }
-        JSObject o = new JSObject(); o.put("id", id); o.put("name", name); o.put("mime", mime); o.put("size", size); o.put("uploaded", uploaded); o.put("resource_type", resourceType); o.put("original_uri", originalUri); o.put("original_removed", originalRemoved); rows.add(o.toString());
+        JSObject o = new JSObject(); o.put("id", id); o.put("name", name); o.put("mime", mime); o.put("size", size); o.put("uploaded", uploaded); o.put("resource_type", resourceType); o.put("original_uri", originalUri); o.put("original_removed", originalRemoved); o.put("path", path); rows.add(o.toString());
         writeAll(metaFile(), String.join("\n", rows));
     }
 

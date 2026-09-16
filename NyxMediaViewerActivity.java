@@ -38,7 +38,6 @@ public class NyxMediaViewerActivity extends Activity {
     private static final String META = "nyx-media.json";
     private static final String KEY_ALIAS = "nyx_media_aes_key_v2";
     private static final int GCM_TAG_BITS = 128;
-    private File temp;
     private VideoView video;
     private MediaPlayer audioPlayer;
     private TextView status;
@@ -59,7 +58,6 @@ public class NyxMediaViewerActivity extends Activity {
 
     @Override public void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        getWindow().addFlags(WindowManager.LayoutParams.FLAG_SECURE);
         getWindow().setStatusBarColor(Color.rgb(9,9,9)); getWindow().setNavigationBarColor(Color.rgb(9,9,9));
         String id=getIntent().getStringExtra("media_id"); if(id==null||id.isEmpty()){finish();return;}
         try{render(id);}catch(Exception e){showError(e.getMessage());}
@@ -77,19 +75,15 @@ public class NyxMediaViewerActivity extends Activity {
         TextView kind=text(kind(mime),11,Color.rgb(105,105,105)); kind.setPadding(0,dp(2),0,0); titleBox.addView(kind); bar.addView(titleBox,new LinearLayout.LayoutParams(0,ViewGroup.LayoutParams.WRAP_CONTENT,1));
         TextView lock=text("PRIVATE",10,Color.rgb(110,110,110)); lock.setGravity(Gravity.CENTER); bar.addView(lock,new LinearLayout.LayoutParams(dp(62),dp(38))); root.addView(bar,new LinearLayout.LayoutParams(-1,-2));
         FrameLayout stage=new FrameLayout(this); stage.setBackgroundColor(Color.rgb(5,5,5));
-        TextView loading=text("Decrypting securely…",13,Color.rgb(120,120,120)); loading.setGravity(Gravity.CENTER); stage.addView(loading,new FrameLayout.LayoutParams(-1,-1)); root.addView(stage,new LinearLayout.LayoutParams(-1,0,1));
+        TextView loading=text("Loading media…",13,Color.rgb(120,120,120)); loading.setGravity(Gravity.CENTER); stage.addView(loading,new FrameLayout.LayoutParams(-1,-1)); root.addView(stage,new LinearLayout.LayoutParams(-1,0,1));
         status=text("Preparing private media…",12,Color.rgb(115,115,115)); status.setGravity(Gravity.CENTER); root.addView(status,new LinearLayout.LayoutParams(-1,dp(34))); setContentView(root);
         stage.animate().alpha(1f).setDuration(120).start();
-        new Thread(() -> {
-            File decrypted=null; Exception error=null;
-            try { decrypted=decryptToCache(id,"nyx_view_"+id+System.currentTimeMillis()+suffix(name,mime)); } catch(Exception e){error=e;}
-            File ready=decrypted; Exception err=error;
-            runOnUiThread(() -> {
-                if(isFinishing()){if(ready!=null)ready.delete();return;}
-                if(err!=null){loading.setText(err.getMessage()==null?"Could not open media":err.getMessage());status.setText("Private viewer error");return;}
-                temp=ready; loading.setVisibility(View.GONE); buildStage(stage,mime,ready);
-            });
-        },"nyx-media-decrypt").start();
+        try {
+            File ready=mediaFile(meta);
+            if(ready==null||!ready.exists())throw new Exception("Media file is missing");
+            loading.setVisibility(View.GONE);
+            buildStage(stage,mime,ready);
+        } catch(Exception e){ loading.setText(e.getMessage()==null?"Could not open media":e.getMessage()); status.setText("NYX viewer error"); }
     }
 
     private void buildStage(FrameLayout stage,String mime,File file){
