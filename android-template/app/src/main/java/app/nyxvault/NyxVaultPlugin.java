@@ -65,7 +65,7 @@ public class NyxVaultPlugin extends Plugin {
     private static final String ROOT = "nyx-media";
     private static final String META = "nyx-media.json";
     private static final String PREFS = "nyx-secure";
-    private static final String KEY_ALIAS = "nyx_media_aes_key_v1";
+    private static final String KEY_ALIAS = "nyx_media_aes_key_v2";
     private static final int PBKDF2_ITERATIONS = 150000;
     private static final int GCM_TAG_BITS = 128;
     private static final int PICK_CODE = 7137;
@@ -336,7 +336,7 @@ public class NyxVaultPlugin extends Plugin {
         KeyStore ks = KeyStore.getInstance("AndroidKeyStore"); ks.load(null);
         if (ks.containsAlias(KEY_ALIAS)) return ((KeyStore.SecretKeyEntry) ks.getEntry(KEY_ALIAS, null)).getSecretKey();
         KeyGenerator kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
-        kg.init(new KeyGenParameterSpec.Builder(KEY_ALIAS, KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT).setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE).setKeySize(256).build());
+        kg.init(new KeyGenParameterSpec.Builder(KEY_ALIAS, KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT).setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE).setKeySize(256).setRandomizedEncryptionRequired(false).build());
         return kg.generateKey();
     }
 

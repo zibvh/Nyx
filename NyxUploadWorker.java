@@ -25,7 +25,7 @@ import org.json.JSONObject;
 public class NyxUploadWorker extends Worker {
   private static final int CHUNK = 6 * 1024 * 1024;
   private static final int TAG_BITS = 128;
-  private static final String KEY_ALIAS = "nyx_media_aes_key_v1";
+  private static final String KEY_ALIAS = "nyx_media_aes_key_v2";
 
   public NyxUploadWorker(@NonNull Context context, @NonNull WorkerParameters params){ super(context, params); }
 

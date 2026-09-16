@@ -32,3 +32,7 @@ For this development build, install the generated debug APK directly on the test
 This development build intentionally uses `assembleDebug` only. Release keystore/signing configuration is not included.
 
 The Android patch explicitly registers `NyxVaultPlugin` in `MainActivity` before the Capacitor bridge starts, so private setup can reach the native vault methods. The first-launch splash remains visible briefly before the setup screen.
+
+
+## v0.9.35 crypto fix
+Android Keystore AES-GCM now uses a fresh v2 key alias and explicitly allows the app to provide the random 12-byte IV stored with each encrypted file. This fixes the Android Keystore error where a caller-provided IV was rejected.

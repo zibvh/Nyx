@@ -82,8 +82,13 @@ $("#importBtn").onclick=async()=>{
 async function choosePicker(source){
   $("#pickerChoiceModal").classList.remove("show");
   try{
-    await Native.pickMedia({source});
-    await renderVault();
+    const r=await Native.pickMedia({source});
+    if(r?.imported) {
+      await renderVault();
+      if(r.warning) alert(`Imported ${r.imported} item(s). ${r.warning}`);
+    } else {
+      throw new Error(r?.warning || "No media was imported");
+    }
   }catch(e){
     if(e?.message && !/cancel/i.test(e.message)) alert(e.message);
   }
