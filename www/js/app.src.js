@@ -12,31 +12,6 @@ initNativeBridge();
 
 const $=s=>document.querySelector(s);
 
-// Global tactile feedback: every tappable NYX action visibly acknowledges the tap immediately.
-(function installTapFeedback(){
-  const press=(el)=>{
-    if(!el||el.disabled||el.classList.contains("tap-no-feedback"))return;
-    el.classList.remove("tap-pulse");
-    void el.offsetWidth;
-    el.classList.add("tap-pulse");
-    clearTimeout(el.__nyxTapTimer);
-    el.__nyxTapTimer=setTimeout(()=>el.classList.remove("tap-pulse"),520);
-    if(!el.querySelector(".tap-ripple")){
-      const r=document.createElement("span"); r.className="tap-ripple"; r.setAttribute("aria-hidden","true"); el.appendChild(r);
-      setTimeout(()=>r.remove(),520);
-    }
-  };
-  document.addEventListener("pointerdown",e=>{
-    const el=e.target.closest("button,[role=button],input[type=submit],input[type=button]");
-    if(el) press(el);
-  },{passive:true});
-  document.addEventListener("keydown",e=>{
-    if(e.key!=="Enter"&&e.key!==" ")return;
-    const el=e.target.closest("button,[role=button],input[type=submit],input[type=button]");
-    if(el) press(el);
-  });
-})();
-
 if(window.Capacitor){
 
 }
@@ -61,8 +36,9 @@ const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&
 function renderNotes(){$("#notesList").innerHTML=notes.length?notes.map(n=>`<article class="note"><h3>${esc(n.title||"Untitled")}</h3><p>${esc(n.body)}</p><small>${new Date(n.createdAt).toLocaleString()}</small></article>`).join(""):`<p class="muted">No notes yet.</p>`}
 let uploadStatusCache={};
 async function refreshUploadStatus(){if(!Native?.getUploadStatus)return;try{const r=await Native.getUploadStatus(),items=r.items||[];uploadStatusCache={};items.forEach(x=>uploadStatusCache[x.id]=x);document.querySelectorAll(".media").forEach(card=>{const st=uploadStatusCache[card.dataset.id];const box=card.querySelector(".upload-state");if(!st||st.state==="uploaded"){if(box)box.remove();return}const pct=Math.max(0,Math.min(100,Number(st.percent)||0));if(box){box.querySelector(".upload-pct").textContent=st.state==="failed"?"Upload failed":`${pct}%`;box.querySelector("i").style.width=pct+"%";box.querySelector(".upload-label").classList.toggle("upload-error",st.state==="failed")}else{const div=document.createElement("div");div.className="upload-state";div.innerHTML=`<div class="upload-label"><span>${st.state==="failed"?"Upload failed":"Uploading"}</span><span class="upload-pct">${st.state==="failed"?"Upload failed":pct+"%"}</span></div><div class="upload-bar"><i style="width:${pct}%"></i></div>`;card.appendChild(div)}})}catch{}}
-async function renderVault(){if(!Native){$("#vaultGrid").innerHTML='<p class="muted">Private storage is available in the Android build.</p>';return}try{const r=await Native.listMedia(),items=r.items||[];if(!items.length){$("#vaultGrid").innerHTML='<p class="muted">No private media yet.</p>';return}$("#vaultGrid").innerHTML=items.map(m=>`<button class="media" data-id="${esc(m.id)}"><div class="media-placeholder" id="thumb-${esc(m.id)}">${m.mime?.startsWith("video/")?"VIDEO":"PHOTO"}</div><span>${esc(m.name||"MEDIA")}</span></button>`).join("");items.forEach(loadThumb);await refreshUploadStatus()}catch{$("#vaultGrid").innerHTML='<p class="muted">No private media yet.</p>'}}
-async function loadThumb(m){try{const r=await Native.getThumbnail({id:m.id});if(r.data){const holder=$("#thumb-"+CSS.escape(m.id));if(holder)holder.innerHTML=`<img src="data:${r.mime||"image/jpeg"};base64,${r.data}" alt="">`}}catch{}}
+const thumbCache={};
+async function renderVault(){if(!Native){$("#vaultGrid").innerHTML='<p class="muted">Private storage is available in the Android build.</p>';return}try{const r=await Native.listMedia(),items=r.items||[];const grid=$("#vaultGrid");if(!items.length){grid.innerHTML='<p class="muted">No private media yet.</p>';return}const wanted=new Set(items.map(m=>String(m.id)));grid.querySelectorAll('.media').forEach(card=>{if(!wanted.has(String(card.dataset.id)))card.remove()});const existing=new Set([...grid.querySelectorAll('.media')].map(x=>String(x.dataset.id)));for(const m of items){if(existing.has(String(m.id))){const label=grid.querySelector(`[data-id="${CSS.escape(String(m.id))}"] span`);if(label)label.textContent=m.name||"MEDIA";continue;}const card=document.createElement('button');card.className='media media-enter';card.dataset.id=m.id;card.innerHTML=`<div class="media-placeholder" id="thumb-${esc(m.id)}">${m.mime?.startsWith("video/")?"VIDEO":"PHOTO"}</div><span>${esc(m.name||"MEDIA")}</span>`;grid.appendChild(card);requestAnimationFrame(()=>card.classList.add('ready'));loadThumb(m)}await refreshUploadStatus()}catch{$("#vaultGrid").innerHTML='<p class="muted">No private media yet.</p>'}}
+async function loadThumb(m){const key=String(m.id);if(thumbCache[key]){const holder=$("#thumb-"+CSS.escape(key));if(holder)holder.innerHTML=`<img src="${thumbCache[key]}" alt="">`;return}try{const r=await Native.getThumbnail({id:m.id});if(r.data){const uri=`data:${r.mime||"image/jpeg"};base64,${r.data}`;thumbCache[key]=uri;const holder=$("#thumb-"+CSS.escape(key));if(holder)holder.innerHTML=`<img src="${uri}" alt="">`}}catch{}}
 async function unlock(){const pin=$("#pinInput").value.trim();if(!/^[0-9]{6}$/.test(pin)||!pendingSecret){$("#unlockMsg").textContent="Enter your 6-digit PIN.";return}try{const r=await Native.verifyCredential({secret:pendingSecret,pin});if(r.ok){pendingSecret="";$("#pinInput").value="";$("#unlockModal").classList.remove("show");show("#vaultView");Native.setSecureScreen?.({enabled:true}).catch?.(()=>{});await renderVault();}else{$("#unlockMsg").textContent="Wrong PIN.";$("#pinInput").select()}}catch{$("#unlockMsg").textContent="Could not unlock."}}
 function openMediaModal(id){activeMediaId=id;$("#mediaModal").classList.add("show");$("#mediaPreview").style.display="none";$("#mediaPreviewFallback").style.display="grid";$("#mediaMsg").textContent="Loading preview…";Native.listMedia().then(r=>{const m=(r.items||[]).find(x=>x.id===id);$("#mediaName").textContent=m?.name||"Private media";return Native.getThumbnail({id})}).then(r=>{if(r?.data){$("#mediaPreview").src=`data:${r.mime||"image/jpeg"};base64,${r.data}`;$("#mediaPreview").style.display="block";$("#mediaPreviewFallback").style.display="none"}$("#mediaMsg").textContent=""}).catch(()=>{$("#mediaMsg").textContent="Preview unavailable. You can still try Open."})}
 async function closeMedia(){activeMediaId="";$("#mediaModal").classList.remove("show");if(Native?.clearTempCache)try{await Native.clearTempCache()}catch{}}

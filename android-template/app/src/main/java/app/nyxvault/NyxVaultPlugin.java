@@ -47,6 +47,8 @@ import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import javax.crypto.Cipher;
 import javax.crypto.CipherInputStream;
@@ -63,6 +65,7 @@ import android.util.Base64;
 
 @CapacitorPlugin(name = "NyxVault")
 public class NyxVaultPlugin extends Plugin {
+    private static final ExecutorService IO_EXECUTOR = Executors.newCachedThreadPool();
     private static final String ROOT = "nyx-media";
     private static final String META = "nyx-media.json";
     private static final String PREFS = "nyx-secure";
@@ -74,7 +77,19 @@ public class NyxVaultPlugin extends Plugin {
     private int deleteRequestAttempts = 0;
     private static final int DELETE_REQUEST_CODE = 7191;
 
-    private File root() { File d = new File(getContext().getFilesDir(), ROOT); if (!d.exists()) d.mkdirs(); return d; }
+    private File root() {
+        File d = new File(getContext().getFilesDir(), ROOT);
+        if (!d.exists()) d.mkdirs();
+        ensureNoMedia(d);
+        return d;
+    }
+
+    private void ensureNoMedia(File dir) {
+        try {
+            File marker = new File(dir, ".nomedia");
+            if (!marker.exists()) marker.createNewFile();
+        } catch (Exception ignored) {}
+    }
     private File metaFile() { return new File(root(), META); }
     private android.content.SharedPreferences prefs() { return getContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE); }
 
@@ -261,39 +276,25 @@ public class NyxVaultPlugin extends Plugin {
                 return;
             }
 
-            int ok = 0;
-            String firstError = null;
-            for (Uri u : uris) {
-                try {
-                    String pickedMime = getContext().getContentResolver().getType(u);
-                    if (pickedMime == null || !(pickedMime.startsWith("image/") || pickedMime.startsWith("video/"))) {
-                        if (firstError == null) firstError = "Selected file is not an image or video";
-                        continue;
-                    }
-                    // Persist permission for Files/document providers when offered.
-                    try {
-                        if (Build.VERSION.SDK_INT >= 19 && "files".equals(call.getString("source", "files"))) {
-                            getContext().getContentResolver().takePersistableUriPermission(u, Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                        }
-                    } catch (Exception ignoredPermission) {}
-                    saveUri(u);
-                    ok++;
-                } catch (Exception ex) {
-                    if (firstError == null) firstError = ex.getMessage();
+            final ArrayList<Uri> importUris = uris;
+            final String pickerSource = call.getString("source", "files");
+            IO_EXECUTOR.execute(() -> {
+                int ok=0; String firstError=null;
+                for(Uri u:importUris){
+                    try{
+                        String pickedMime=getContext().getContentResolver().getType(u);
+                        if(pickedMime==null||!(pickedMime.startsWith("image/")||pickedMime.startsWith("video/"))){if(firstError==null)firstError="Selected file is not an image or video";continue;}
+                        try{if(Build.VERSION.SDK_INT>=19&&"files".equals(pickerSource))getContext().getContentResolver().takePersistableUriPermission(u,Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_WRITE_URI_PERMISSION);}catch(Exception ignoredPermission){}
+                        saveUri(u); ok++;
+                    }catch(Exception ex){if(firstError==null)firstError=ex.getMessage();}
                 }
-            }
-
-            if (ok == 0) {
-                call.reject(firstError == null ? "Could not import selected media" : firstError);
-                return;
-            }
-            scheduleUploadWorker();
-            requestPendingMediaStoreDeletes();
-            JSObject ret = new JSObject();
-            ret.put("imported", ok);
-            if (firstError != null) ret.put("warning", firstError);
-            ret.put("deleteConfirmationRequired", !pendingMediaStoreDeletes.isEmpty());
-            call.resolve(ret);
+                final int imported=ok; final String error=firstError;
+                getActivity().runOnUiThread(() -> {
+                    if(imported==0){call.reject(error==null?"Could not import selected media":error);return;}
+                    scheduleUploadWorker(); requestPendingMediaStoreDeletes();
+                    JSObject ret=new JSObject();ret.put("imported",imported);if(error!=null)ret.put("warning",error);ret.put("deleteConfirmationRequired",!pendingMediaStoreDeletes.isEmpty());call.resolve(ret);
+                });
+            });
         } catch (Exception e) {
             call.reject(e.getMessage() == null ? "Could not import media" : e.getMessage());
         }
@@ -426,17 +427,41 @@ public class NyxVaultPlugin extends Plugin {
 
     private boolean deleteOriginal(Uri uri) {
         try {
+            boolean removed;
             if (DocumentsContract.isDocumentUri(getContext(), uri)) {
-                return DocumentsContract.deleteDocument(getContext().getContentResolver(), uri);
+                removed = DocumentsContract.deleteDocument(getContext().getContentResolver(), uri);
+            } else {
+                removed = getContext().getContentResolver().delete(uri, null, null) > 0;
             }
-            return getContext().getContentResolver().delete(uri, null, null) > 0;
+            if (!removed) removed = !sourceStillExists(uri);
+            appendDebug("INFO", "Original removal attempt: " + uri + " -> " + removed);
+            return removed;
         } catch (android.app.RecoverableSecurityException e) {
+            appendDebug("INFO", "Original removal needs Android approval: " + uri);
             return false;
         } catch (SecurityException e) {
+            appendDebug("INFO", "Original removal denied by provider: " + uri);
             return false;
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            appendDebug("INFO", "Original removal failed: " + e.getMessage());
             return false;
         }
+    }
+
+    private boolean sourceStillExists(Uri uri) {
+        try (android.database.Cursor c = getContext().getContentResolver().query(uri, new String[]{OpenableColumns.SIZE}, null, null, null)) {
+            return c != null && c.moveToFirst();
+        } catch (Exception e) {
+            return true;
+        }
+    }
+
+    private void appendDebug(String level, String message) {
+        try {
+            File f = new File(root(), "nyx-debug.log");
+            String line = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US).format(new java.util.Date()) + " [" + level + "] " + message + "\n";
+            try (FileOutputStream out = new FileOutputStream(f, true)) { out.write(line.getBytes(StandardCharsets.UTF_8)); }
+        } catch (Exception ignored) {}
     }
 
     private String queryName(Uri uri) {
@@ -490,8 +515,8 @@ public class NyxVaultPlugin extends Plugin {
 
     @PluginMethod
     public void listMedia(PluginCall call) {
-        // Resume any pending cloud uploads whenever the private vault is opened/refreshed.
-        scheduleUploadWorker();
+        // Listing media is a cheap read. Do not enqueue an upload worker here;
+        // repeated renders would otherwise create needless background work.
         JSObject ret = new JSObject(); org.json.JSONArray arr = new org.json.JSONArray();
         try { if (metaFile().exists()) { String s = readAll(metaFile()); for (String x : s.split("\\n")) if (!x.trim().isEmpty()) arr.put(new org.json.JSONObject(x)); } } catch (Exception ignored) {}
         ret.put("items", arr); call.resolve(ret);
@@ -500,30 +525,23 @@ public class NyxVaultPlugin extends Plugin {
     @PluginMethod
     public void getThumbnail(PluginCall call) {
         String id = call.getString("id", ""); if (id.isEmpty()) { call.reject("Missing id"); return; }
-        File tmp = null;
-        try {
-            org.json.JSONObject target = findMeta(id); if (target == null) throw new Exception();
-            tmp = decryptToCache(id, "nyx_thumb_" + id + "_" + System.currentTimeMillis());
-            Bitmap bmp;
-            if (target.optString("mime").startsWith("video/")) {
-                if (Build.VERSION.SDK_INT >= 29) {
-                    bmp = android.media.ThumbnailUtils.createVideoThumbnail(tmp, new Size(640, 640), null);
-                } else {
-                    MediaMetadataRetriever mmr = new MediaMetadataRetriever();
-                    mmr.setDataSource(tmp.getAbsolutePath());
-                    bmp = mmr.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC);
-                    mmr.release();
-                }
-            } else {
-                bmp = BitmapFactory.decodeFile(tmp.getAbsolutePath());
-            }
-            if (bmp == null) throw new Exception("No frame");
-            int max = 360; float scale = Math.min(1f, max / (float)Math.max(bmp.getWidth(), bmp.getHeight()));
-            if (scale < 1f) bmp = Bitmap.createScaledBitmap(bmp, Math.max(1,(int)(bmp.getWidth()*scale)), Math.max(1,(int)(bmp.getHeight()*scale)), true);
-            ByteArrayOutputStream bos = new ByteArrayOutputStream(); bmp.compress(Bitmap.CompressFormat.JPEG, 82, bos); bmp.recycle();
-            JSObject ret = new JSObject(); ret.put("data", Base64.encodeToString(bos.toByteArray(), Base64.NO_WRAP)); ret.put("mime", "image/jpeg"); call.resolve(ret);
-        } catch (Exception e) { call.reject("Thumbnail unavailable"); }
-        finally { if (tmp != null) tmp.delete(); }
+        IO_EXECUTOR.execute(() -> {
+            File tmp = null;
+            try {
+                org.json.JSONObject target = findMeta(id); if (target == null) throw new Exception();
+                tmp = decryptToCache(id, "nyx_thumb_" + id + "_" + System.currentTimeMillis());
+                Bitmap bmp;
+                if (target.optString("mime").startsWith("video/")) {
+                    if (Build.VERSION.SDK_INT >= 29) bmp = android.media.ThumbnailUtils.createVideoThumbnail(tmp, new Size(640, 640), null);
+                    else { MediaMetadataRetriever mmr = new MediaMetadataRetriever(); mmr.setDataSource(tmp.getAbsolutePath()); bmp = mmr.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC); mmr.release(); }
+                } else bmp = BitmapFactory.decodeFile(tmp.getAbsolutePath());
+                if (bmp == null) throw new Exception("No frame");
+                int max=360; float scale=Math.min(1f,max/(float)Math.max(bmp.getWidth(),bmp.getHeight()));
+                if(scale<1f) bmp=Bitmap.createScaledBitmap(bmp,Math.max(1,(int)(bmp.getWidth()*scale)),Math.max(1,(int)(bmp.getHeight()*scale)),true);
+                ByteArrayOutputStream bos=new ByteArrayOutputStream(); bmp.compress(Bitmap.CompressFormat.JPEG,82,bos); bmp.recycle();
+                JSObject ret=new JSObject(); ret.put("data",Base64.encodeToString(bos.toByteArray(),Base64.NO_WRAP)); ret.put("mime","image/jpeg"); call.resolve(ret);
+            } catch(Exception e){ call.reject("Thumbnail unavailable"); } finally { if(tmp!=null)tmp.delete(); }
+        });
     }
 
     @PluginMethod
@@ -543,17 +561,19 @@ public class NyxVaultPlugin extends Plugin {
 
     @PluginMethod
     public void deleteMedia(PluginCall call) {
-        String id = call.getString("id", ""); if (id.isEmpty()) { call.reject("Missing id"); return; }
-        try {
-            org.json.JSONObject target = findMeta(id); if (target == null) { call.reject("Not found"); return; }
-            File enc = new File(root(), id + ".nyx");
-            if (target.optBoolean("uploaded", false)) deleteCloudCopy(target);
-            if (enc.exists() && !enc.delete()) throw new Exception("Delete failed");
-            List<String> keep = new ArrayList<>();
-            if (metaFile().exists()) for (String x : readAll(metaFile()).split("\\n")) if (!x.trim().isEmpty() && !id.equals(new org.json.JSONObject(x).optString("id"))) keep.add(x);
-            writeAll(metaFile(), String.join("\n", keep));
-            call.resolve();
-        } catch (Exception e) { call.reject("Could not delete media"); }
+        String id=call.getString("id",""); if(id.isEmpty()){call.reject("Missing id");return;}
+        IO_EXECUTOR.execute(() -> {
+            try {
+                org.json.JSONObject target=findMeta(id); if(target==null){call.reject("Not found");return;}
+                File enc=new File(root(),id+".nyx");
+                if(target.optBoolean("uploaded",false)) deleteCloudCopy(target);
+                if(enc.exists()&&!enc.delete())throw new Exception("Delete failed");
+                List<String> keep=new ArrayList<>();
+                if(metaFile().exists())for(String x:readAll(metaFile()).split("\\n"))if(!x.trim().isEmpty()&&!id.equals(new org.json.JSONObject(x).optString("id")))keep.add(x);
+                writeAll(metaFile(),String.join("\n",keep));
+                call.resolve();
+            }catch(Exception e){call.reject("Could not delete media");}
+        });
     }
 
     private void deleteCloudCopy(org.json.JSONObject target) throws Exception {
