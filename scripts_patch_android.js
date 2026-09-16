@@ -54,7 +54,9 @@ if(!m.includes('androidx.core.content.FileProvider')){
 const gradle=path.join(root,'app','build.gradle');
 let g=fs.readFileSync(gradle,'utf8');
 if(!g.includes('androidx.biometric:biometric')){
-  g=g.replace(/dependencies \{/,`dependencies {\n    implementation 'androidx.biometric:biometric:1.1.0'\n    implementation 'androidx.work:work-runtime:2.10.1'`);
+  g=g.replace(/dependencies \{/,`dependencies {\n    implementation 'androidx.biometric:biometric:1.1.0'\n    implementation 'androidx.work:work-runtime:2.10.1'
+    implementation 'androidx.media3:media3-exoplayer:1.5.1'
+    implementation 'androidx.media3:media3-ui:1.5.1'`);
 }
 // v26 intentionally builds DEBUG only. No release signing or keystore configuration.
 fs.writeFileSync(gradle,g);
