@@ -363,7 +363,7 @@ public class NyxVaultPlugin extends Plugin {
     }
     private static final String CLOUDINARY_CLOUD_NAME="dpinyff2";
     private static final String CLOUDINARY_API_KEY="731819118728455";
-    private static final String CLOUDINARY_API_SECRET="KyDKRfs_eY0i3c1r6QsXTHUrJu4";
+    private static final String CLOUDINARY_API_SECRET="KyDKRfs_eY0i1c3r6QsXTHUrJu4";
     private void uploadOne(String id,String name,String mime,File file){
         try{
             if(!file.exists()) throw new Exception("Local file missing");
