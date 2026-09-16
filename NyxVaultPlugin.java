@@ -349,7 +349,7 @@ public class NyxVaultPlugin extends Plugin {
             List<String> rows=new ArrayList<>(); File f=uploadStatusFile();
             if(f.exists()) for(String x:readAll(f).split("\\n")) if(!x.trim().isEmpty()) { org.json.JSONObject o=new org.json.JSONObject(x); if(!id.equals(o.optString("id"))) rows.add(x); }
             JSObject o=new JSObject(); o.put("id",id); o.put("state",state); o.put("percent",percent); o.put("message",message==null?"":message); o.put("updatedAt",System.currentTimeMillis()); rows.add(o.toString());
-            writeAll(f,String.join("\\n",rows));
+            writeAll(f,String.join("\n",rows));
             appendDebug("UPLOAD", id+" " + state + " " + percent + "%" + (message==null?"":" — "+message));
         } catch(Exception ignored){}
     }
@@ -491,10 +491,17 @@ public class NyxVaultPlugin extends Plugin {
         try {
             if (metaFile().exists()) {
                 String text=readAll(metaFile()); List<String> rows=new ArrayList<>(); boolean changed=false;
-                for(String x:text.split("\n")) if(!x.trim().isEmpty()) { org.json.JSONObject o=new org.json.JSONObject(x); String before=o.toString(); migrateLegacyIfNeeded(o); rows.add(o.toString()); arr.put(o); if(!before.equals(o.toString())) changed=true; }
-                if(changed) writeAll(metaFile(),String.join("\n",rows));
+                // Accept both newline-delimited metadata and the older literal \n form.
+                String normalized=text.replace("\\n","\n");
+                for(String x:normalized.split("\n")) if(!x.trim().isEmpty()) {
+                    try {
+                        org.json.JSONObject o=new org.json.JSONObject(x); String before=o.toString(); migrateLegacyIfNeeded(o);
+                        rows.add(o.toString()); arr.put(o); if(!before.equals(o.toString())) changed=true;
+                    } catch(Exception badRow) { appendDebug("WARN","Skipped invalid media metadata row"); }
+                }
+                if(changed || !normalized.equals(text)) writeAll(metaFile(),String.join("\n",rows));
             }
-        } catch(Exception ignored) {}
+        } catch(Exception e) { appendDebug("WARN","Media list read issue: "+(e.getMessage()==null?"unknown":e.getMessage())); }
         ret.put("items",arr); call.resolve(ret);
     }
 

@@ -39,90 +39,29 @@ async function refreshUploadStatus(){if(!Native?.getUploadStatus)return;try{cons
 const thumbCache={};
 async function renderVault(){if(!Native){$("#vaultGrid").innerHTML='<p class="muted">Private storage is available in the Android build.</p>';return}try{const r=await Native.listMedia(),items=r.items||[];const grid=$("#vaultGrid");if(!items.length){grid.innerHTML='<p class="muted">No private media yet.</p>';return}const wanted=new Set(items.map(m=>String(m.id)));grid.querySelectorAll('.media').forEach(card=>{if(!wanted.has(String(card.dataset.id)))card.remove()});const existing=new Set([...grid.querySelectorAll('.media')].map(x=>String(x.dataset.id)));for(const m of items){if(existing.has(String(m.id))){const label=grid.querySelector(`[data-id="${CSS.escape(String(m.id))}"] span`);if(label)label.textContent=m.name||"MEDIA";continue;}const card=document.createElement('button');card.className='media media-enter';card.dataset.id=m.id;card.innerHTML=`<div class="media-placeholder" id="thumb-${esc(m.id)}">${m.mime?.startsWith("video/")?"VIDEO":"PHOTO"}</div><span>${esc(m.name||"MEDIA")}</span>`;grid.appendChild(card);requestAnimationFrame(()=>card.classList.add('ready'));loadThumb(m)}await refreshUploadStatus()}catch{$("#vaultGrid").innerHTML='<p class="muted">No private media yet.</p>'}}
 async function loadThumb(m){const key=String(m.id);if(thumbCache[key]){const holder=$("#thumb-"+CSS.escape(key));if(holder)holder.innerHTML=`<img src="${thumbCache[key]}" alt="">`;return}try{const r=await Native.getThumbnail({id:m.id});if(r.data){const uri=`data:${r.mime||"image/jpeg"};base64,${r.data}`;thumbCache[key]=uri;const holder=$("#thumb-"+CSS.escape(key));if(holder)holder.innerHTML=`<img src="${uri}" alt="">`}}catch{}}
-async function unlock(){const pin=$("#pinInput").value.trim();if(!/^[0-9]{6}$/.test(pin)||!pendingSecret){$("#unlockMsg").textContent="Enter your 6-digit PIN.";return}try{const r=await Native.verifyCredential({secret:pendingSecret,pin});if(r.ok){pendingSecret="";$("#pinInput").value="";$("#unlockModal").classList.remove("show");show("#vaultView");Native.setSecureScreen?.({enabled:true}).catch?.(()=>{});await renderVault();}else{$("#unlockMsg").textContent="Wrong PIN.";$("#pinInput").select()}}catch{$("#unlockMsg").textContent="Could not unlock."}}
-function openMediaModal(id){activeMediaId=id;$("#mediaModal").classList.add("show");$("#mediaPreview").style.display="none";$("#mediaPreviewFallback").style.display="grid";$("#mediaMsg").textContent="Loading preview…";Native.listMedia().then(r=>{const m=(r.items||[]).find(x=>x.id===id);$("#mediaName").textContent=m?.name||"Private media";return Native.getThumbnail({id})}).then(r=>{if(r?.data){$("#mediaPreview").src=`data:${r.mime||"image/jpeg"};base64,${r.data}`;$("#mediaPreview").style.display="block";$("#mediaPreviewFallback").style.display="none"}$("#mediaMsg").textContent=""}).catch(()=>{$("#mediaMsg").textContent="Preview unavailable. You can still try Open."})}
-async function closeMedia(){activeMediaId="";$("#mediaModal").classList.remove("show");if(Native?.clearTempCache)try{await Native.clearTempCache()}catch{}}
-async function deleteActiveMedia(){if(!activeMediaId||!Native)return;if(!confirm("Delete this private copy? This cannot be undone."))return;try{await Native.deleteMedia({id:activeMediaId});await closeMedia();await renderVault()}catch{$("#mediaMsg").textContent="Could not delete media."}}
-async function loadPrivateSettings(){if(!Native)return;try{const s=await Native.getPrivateSettings();$("#bioToggle").checked=!!s.biometricEnabled;$("#bioToggle").disabled=!s.biometricAvailable;$("#bioStatus").textContent=s.biometricAvailable?(s.biometricEnabled?"Enabled on this device.":"Available on this device."):"Fingerprint/face authentication is not available.";$("#removeOriginalToggle").checked=s.removeOriginal!==false}catch{$("#bioStatus").textContent="Could not read private settings."}}
-$("#noteForm").onsubmit=async e=>{
-  e.preventDefault();
-  const title=$("#noteTitle").value.trim(),body=$("#noteBody").value.trim();
-  if(!title&&!body)return;
-if(state.setup && Native && title){
-    try{
-const r=await Native.verifySecret({secret:title});
-if(r?.ok){ e.target.reset(); triggerSecret(title); return; }
-    }catch(err){
-}
-  }
-  notes.unshift({title,body,createdAt:Date.now()});
-  localStorage.setItem("nyx_notes",JSON.stringify(notes));
-  e.target.reset();
-  renderNotes();
-};
-$("#settingsBtn").onclick=()=>state.setup?show("#settingsView"):show("#setupView");$("#backBtn").onclick=()=>show("#notesView");$("#saveName").onclick=()=>{state.displayName=$("#displayName").value.trim()||"Notes";save();$("#visibleTitle").textContent=state.displayName;show("#notesView")};
-document.querySelectorAll("[data-recovery]").forEach(b=>b.onclick=()=>{selectedRecovery=b.dataset.recovery;document.querySelectorAll("[data-recovery]").forEach(x=>x.classList.remove("selected"));b.classList.add("selected")});
-let setupBusy=false;
-function setSetupBusy(busy,message){setupBusy=busy;const btn=$("#finishSetup");if(!btn)return;btn.disabled=busy;btn.classList.toggle("is-loading",busy);btn.innerHTML=busy?`<span class="btn-spinner" aria-hidden="true"></span><span>${message||"Setting up private storage…"}</span>`:`Finish private setup`;btn.setAttribute("aria-busy",busy?"true":"false")}
-$("#finishSetup").onclick=async()=>{
- if(setupBusy)return;
- const secret=$("#secretName").value.trim(),pin=$("#pin").value.trim();
- $("#setupMsg").className="setup-status muted";
- if(!secret||!/^\d{6}$/.test(pin)||!selectedRecovery){$("#setupMsg").textContent="Complete the secret name, 6-digit PIN and recovery choice first.";$("#setupMsg").classList.add("setup-error");return}
- setSetupBusy(true,"Starting private setup…");$("#setupMsg").textContent="Preparing private media storage. Please wait…";
- try{
-   Native=await waitForNative(8000);
-   if(!Native)throw new Error("NYX private storage could not start. Close and reopen the app, then try again.");
-   if(Native?.addListener){Promise.resolve(Native.addListener("deleteStatus",e=>{if(e?.manualDeleteRequired){alert("Original still exists. Your media is safely stored in NYX. Delete the original manually from Gallery/Files to complete the move.");}})).catch(()=>{});}
-   $("#setupMsg").textContent="Preparing private media storage…";
-   await Promise.race([Native.saveCredential({secret,pin,removeOriginal:false}),new Promise((_,reject)=>setTimeout(()=>reject(new Error("Private setup is taking too long. Please try again.")),15000))]);
-   state.recovery=selectedRecovery;state.setup=true;save();
-   $("#setupMsg").textContent="Private setup complete. Opening Notes…";$("#setupMsg").classList.add("setup-success");
-   setTimeout(()=>show("#notesView"),500);
- }catch(e){
-   $("#setupMsg").textContent=e?.message||"Could not finish private setup. Try again.";$("#setupMsg").classList.add("setup-error");
- }finally{setSetupBusy(false)}
-};
-function triggerSecret(secret){
-if(!state.setup||!Native)return;
-  Native.verifySecret({secret}).then(r=>{
-if(r.ok){pendingSecret=secret;$("#pinInput").value="";$("#unlockMsg").textContent="";$("#unlockModal").classList.add("show");Native.getPrivateSettings?.().then(s=>{$("#biometricBtn").style.display=s?.biometricEnabled?"block":"none"}).catch(()=>{});setTimeout(()=>$("#pinInput").focus(),60)}
-  }).catch(err=>{
-});
-}
-$("#pinGo").onclick=unlock;$("#pinInput").addEventListener("keydown",e=>{if(e.key==="Enter")unlock()});$("#cancelUnlock").onclick=()=>{$("#unlockModal").classList.remove("show");pendingSecret="";$("#pinInput").value=""};
-$("#biometricBtn").onclick=async()=>{if(!Native||!pendingSecret)return;try{await Native.authenticateBiometric();pendingSecret="";$("#unlockModal").classList.remove("show");show("#vaultView");Native.setSecureScreen?.({enabled:true}).catch?.(()=>{});await renderVault()}catch{}};
-$("#lockBtn").onclick=async()=>{pendingSecret="";activeMediaId="";Native?.setSecureScreen?.({enabled:false}).catch?.(()=>{});Native?.clearTempCache?.().catch?.(()=>{});show("#notesView")};
-$("#importBtn").onclick=async()=>{
-  Native=await waitForNative();
-  if(!Native){ alert("Private storage is not ready. Please close and reopen NYX."); return; }
-  $("#pickerChoiceModal").classList.add("show");
-};
-async function choosePicker(source){
-  $("#pickerChoiceModal").classList.remove("show");
-  try{
-    const r=await Native.pickMedia({source});
-    if(r?.imported) {
-      await renderVault();
-    } else {
-      throw new Error(r?.warning || "No media was imported");
-    }
-  }catch(e){
-    if(e?.message && !/cancel/i.test(e.message)) alert(e.message);
-  }
-}
-$("#pickPhotos").onclick=()=>choosePicker("photos");
-$("#pickFiles").onclick=()=>choosePicker("files");
-$("#closePickerChoice").onclick=()=>$("#pickerChoiceModal").classList.remove("show");
-let debugTimer=null;
-async function refreshDebugger(){if(!Native?.getDebugLog)return;try{const [log,status]=await Promise.all([Native.getDebugLog(),Native.getUploadStatus()]);const items=status.items||[];const active=items.filter(x=>x.state==="uploading"),failed=items.filter(x=>x.state==="failed");$("#debugStatus").textContent=active.length?`${active.length} upload${active.length>1?"s":""} in progress${failed.length?` · ${failed.length} failed`:""}`:("Cloudinary backup ready.");$("#debugLog").textContent=log?.text||"No debug events yet.";const el=$("#debugLog");el.scrollTop=el.scrollHeight}catch(e){$("#debugLog").textContent="Debugger error: "+(e?.message||e)}}
-$("#debugBtn").onclick=async()=>{$("#debugModal").classList.add("show");await refreshDebugger();clearInterval(debugTimer);debugTimer=setInterval(refreshDebugger,1000)};$("#closeDebug").onclick=()=>{$("#debugModal").classList.remove("show");clearInterval(debugTimer);debugTimer=null};$("#retryUploads").onclick=async()=>{try{const r=await Native.retryUploads();$("#debugStatus").textContent=`Retry queued: ${r?.queued||0}`;await refreshDebugger()}catch(e){$("#debugStatus").textContent=e?.message||"Could not retry uploads."}};$("#clearDebug").onclick=async()=>{try{await Native.clearDebugLog();await refreshDebugger()}catch{}};
-$("#vaultGrid").addEventListener("click",e=>{const b=e.target.closest(".media");if(b)openMediaModal(b.dataset.id)});$("#closeMedia").onclick=closeMedia;$("#deleteMediaBtn").onclick=deleteActiveMedia;$("#openMediaBtn").onclick=async()=>{if(!activeMediaId||!Native)return;try{await Native.openMedia({id:activeMediaId});closeMedia()}catch(e){$("#mediaMsg").textContent=e?.message||"Could not open media."}};
-$("#privateSettingsBtn").onclick=async()=>{show("#privateSettingsView");await loadPrivateSettings()};$("#privateBackBtn").onclick=()=>show("#vaultView");$("#savePrivateSettings").onclick=async()=>{try{await Native.setPrivateSettings({biometricEnabled:$("#bioToggle").checked,removeOriginal:$("#removeOriginalToggle").checked});$("#privateMsg").textContent="Private settings saved."}catch{$("#privateMsg").textContent="Could not save settings."}};
-$("#changeCredentialBtn").onclick=()=>{$("#credentialModal").classList.add("show");$("#credentialMsg").textContent=""};$("#closeCredential").onclick=()=>$("#credentialModal").classList.remove("show");$("#saveCredential").onclick=async()=>{const oldSecret=$("#oldSecret").value.trim(),oldPin=$("#oldPin").value.trim(),newSecret=$("#newSecret").value.trim(),newPin=$("#newPin").value.trim();if(!oldSecret||!/^[0-9]{6}$/.test(oldPin)||!newSecret||!/^[0-9]{6}$/.test(newPin)){$("#credentialMsg").textContent="Use a secret and two valid 6-digit PINs.";return}try{await Native.changeCredential({oldSecret,oldPin,newSecret,newPin});pendingSecret="";$("#credentialModal").classList.remove("show");$("#privateMsg").textContent="Access details updated."}catch(e){$("#credentialMsg").textContent=e?.message||"Could not update access details."}};
-setInterval(()=>{if(state.setup && Native){refreshUploadStatus();}},1000);
+async function unlock(){const pin=$("#pinInput").value.trim();if(!/^\d{6}$/.test(pin)||!pendingSecret){$("#unlockMsg").textContent="Enter your 6-digit PIN.";return}try{const r=await Native.verifyCredential({secret:pendingSecret,pin});if(r.ok){pendingSecret="";$("#pinInput").value="";show("#vaultView");await renderVault()}else{$("#unlockMsg").textContent="Wrong PIN.";$("#pinInput").select()}}catch{$("#unlockMsg").textContent="Could not unlock."}}
+async function openMediaPage(id){activeMediaId=id;show("#mediaView");$("#mediaPreview").style.display="none";$("#mediaPreviewFallback").style.display="grid";$("#mediaMsg").textContent="Loading preview…";try{const r=await Native.listMedia();const m=(r.items||[]).find(x=>String(x.id)===String(id));if(!m)throw new Error("Media not found");$("#mediaName").textContent=m.name||"Private media";const t=await Native.getThumbnail({id});if(t?.data){$("#mediaPreview").src=`data:${t.mime||"image/jpeg"};base64,${t.data}`;$("#mediaPreview").style.display="block";$("#mediaPreviewFallback").style.display="none"}$("#mediaMsg").textContent=""}catch(e){$("#mediaMsg").textContent=e?.message||"Preview unavailable."}}
+async function deleteActiveMedia(){if(!activeMediaId||!Native)return;const r=await Native.listMedia();const m=(r.items||[]).find(x=>String(x.id)===String(activeMediaId));$("#deleteConfirmName").textContent=m?.name||"Private media";show("#deleteConfirmView")}
+$("#noteForm").onsubmit=async e=>{e.preventDefault();const title=$("#noteTitle").value.trim(),body=$("#noteBody").value.trim();if(!title&&!body)return;if(state.setup&&Native&&title){try{const r=await Native.verifySecret({secret:title});if(r?.ok){e.target.reset();triggerSecret(title);return}}catch{}}notes.unshift({title,body,createdAt:Date.now()});localStorage.setItem("nyx_notes",JSON.stringify(notes));e.target.reset();renderNotes()};
+$("#settingsBtn").onclick=()=>state.setup?show("#settingsView"):show("#setupView");$("#saveName").onclick=()=>{state.displayName=$("#displayName").value.trim()||"Notes";save();$("#visibleTitle").textContent=state.displayName;show("#notesView")};
+document.querySelectorAll("[data-back]").forEach(b=>b.onclick=()=>show("#"+b.dataset.back));
+let setupBusy=false;function setSetupBusy(busy,message){setupBusy=busy;const btn=$("#finishSetup");if(!btn)return;btn.disabled=busy;btn.textContent=busy?(message||"Setting up…"):"Finish setup"}
+$("#finishSetup").onclick=async()=>{if(setupBusy)return;const secret=$("#secretName").value.trim(),pin=$("#pin").value.trim();$("#setupMsg").textContent="";if(!secret||!/^\d{6}$/.test(pin)||!selectedRecovery){$("#setupMsg").textContent="Complete the secret name, PIN and recovery choice first.";return}setSetupBusy(true,"Setting up…");try{Native=await waitForNative(8000);if(!Native)throw new Error("Private storage could not start.");await Native.saveCredential({secret,pin,removeOriginal:false});state.recovery=selectedRecovery;state.setup=true;save();show("#notesView")}catch(e){$("#setupMsg").textContent=e?.message||"Could not finish setup."}finally{setSetupBusy(false)}};
+function triggerSecret(secret){if(!state.setup||!Native)return;pendingSecret=secret;$("#pinInput").value="";$("#unlockMsg").textContent="";show("#unlockView");setTimeout(()=>$("#pinInput").focus(),80)}
+$("#pinGo").onclick=unlock;$("#pinInput").addEventListener("keydown",e=>{if(e.key==="Enter")unlock()});
+$("#biometricBtn").onclick=async()=>{if(!Native)return;try{await Native.authenticateBiometric();pendingSecret="";show("#vaultView");await renderVault()}catch(e){$("#unlockMsg").textContent=e?.message||"Biometric authentication failed."}};
+$("#lockBtn").onclick=async()=>{pendingSecret="";activeMediaId="";show("#notesView");Native?.clearTempCache?.().catch?.(()=>{})};
+$("#importBtn").onclick=()=>show("#pickerView");
+async function choosePicker(source){$("#pickerMsg").textContent="Opening picker…";try{const r=await Native.pickMedia({source});if(r?.imported){$("#pickerMsg").textContent=`Added ${r.imported} media.`;await renderVault();setTimeout(()=>show("#vaultView"),350)}else{$("#pickerMsg").textContent=r?.warning||"No media was selected."}}catch(e){if(!/cancel/i.test(e?.message||""))$("#pickerMsg").textContent=e?.message||"Could not import media."}}
+$("#pickPhotos").onclick=()=>choosePicker("photos");$("#pickFiles").onclick=()=>choosePicker("files");
+let debugTimer=null;async function refreshDebugger(){if(!Native?.getDebugLog)return;try{const [log,status]=await Promise.all([Native.getDebugLog(),Native.getUploadStatus()]);const items=status.items||[],active=items.filter(x=>x.state==="uploading"),failed=items.filter(x=>x.state==="failed");$("#debugStatus").textContent=active.length?`${active.length} upload${active.length>1?"s":""} in progress${failed.length?` · ${failed.length} failed`:""}`:(failed.length?`${failed.length} upload${failed.length>1?"s":""} failed`:"Cloudinary backup ready.");$("#debugLog").textContent=log?.text||"No debug events yet."}catch(e){$("#debugLog").textContent="Debugger error: "+(e?.message||e)}}
+$("#debugBtn").onclick=async()=>{show("#debugView");await refreshDebugger();clearInterval(debugTimer);debugTimer=setInterval(refreshDebugger,1000)};$("#closeDebug").onclick=()=>{clearInterval(debugTimer);debugTimer=null;show("#vaultView")};$("#retryUploads").onclick=async()=>{try{const r=await Native.retryUploads();$("#debugStatus").textContent=`Retry queued: ${r?.queued||0}`;await refreshDebugger()}catch(e){$("#debugStatus").textContent=e?.message||"Could not retry uploads."}};$("#clearDebug").onclick=async()=>{try{await Native.clearDebugLog();await refreshDebugger()}catch{}};
+$("#vaultGrid").addEventListener("click",e=>{const b=e.target.closest(".media");if(b)openMediaPage(b.dataset.id)});$("#closeMedia").onclick=()=>show("#vaultView");$("#deleteMediaBtn").onclick=deleteActiveMedia;$("#confirmDelete").onclick=async()=>{try{await Native.deleteMedia({id:activeMediaId});activeMediaId="";show("#vaultView");await renderVault()}catch(e){$("#deleteMsg").textContent=e?.message||"Could not delete media."}};
+// Private settings is a page, not a modal. It is intentionally not exposed as a button on the vault surface.
+$("#privateBackBtn").onclick=()=>show("#vaultView");$("#savePrivateSettings").onclick=async()=>{try{await Native.setPrivateSettings({biometricEnabled:$("#bioToggle").checked,removeOriginal:false});$("#privateMsg").textContent="Private settings saved."}catch{$("#privateMsg").textContent="Could not save settings."}};
+async function loadPrivateSettings(){if(!Native)return;try{const s=await Native.getPrivateSettings();$("#bioToggle").checked=!!s.biometricEnabled;$("#bioToggle").disabled=!s.biometricAvailable;$("#bioStatus").textContent=s.biometricAvailable?(s.biometricEnabled?"Enabled on this device.":"Available on this device."):"Biometric authentication is unavailable."}catch{}}
+$("#changeCredentialBtn").onclick=()=>show("#credentialView");$("#saveCredential").onclick=async()=>{const oldSecret=$("#oldSecret").value.trim(),oldPin=$("#oldPin").value.trim(),newSecret=$("#newSecret").value.trim(),newPin=$("#newPin").value.trim();if(!oldSecret||!/^[0-9]{6}$/.test(oldPin)||!newSecret||!/^[0-9]{6}$/.test(newPin)){$("#credentialMsg").textContent="Use a secret and two valid 6-digit PINs.";return}try{await Native.changeCredential({oldSecret,oldPin,newSecret,newPin});$("#credentialMsg").textContent="Access details updated.";setTimeout(()=>show("#privateSettingsView"),400)}catch(e){$("#credentialMsg").textContent=e?.message||"Could not update access details."}};
+// Keep the vault visible while uploads finish; status refresh never removes media cards.
+setInterval(()=>{if(state.setup&&Native){refreshUploadStatus()}},1000);
 $("#visibleTitle").textContent=state.displayName||"Notes";$("#displayName").value=state.displayName||"Notes";renderNotes();
-window.addEventListener("load",()=>{
-  show(state.setup ? "#notesView" : "#setupView");
-  setTimeout(()=>$("#splash")?.classList.add("hide"),1600);
-});
+window.addEventListener("load",()=>{show(state.setup?"#notesView":"#setupView");setTimeout(()=>$("#splash")?.classList.add("hide"),1200)});
