@@ -10,7 +10,7 @@
   "dependencies": {
     "@capacitor/android": "7.4.0",
     "@capacitor/core": "7.4.0",
-    "@capacitor/app": "7.4.0"
+    "@capacitor/app": "7.1.2"
   },
   "devDependencies": {
     "@capacitor/cli": "7.4.0",
