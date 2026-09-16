@@ -17,7 +17,7 @@ if(window.Capacitor){
 }
 const notes=JSON.parse(localStorage.getItem("nyx_notes")||"[]");
 const state=JSON.parse(localStorage.getItem("nyx_state")||'{"setup":false,"displayName":"Notes","recovery":null}');
-let selectedRecovery=null, pendingSecret="", activeMediaId="";
+let pendingSecret="", activeMediaId="";
 const save=()=>localStorage.setItem("nyx_state",JSON.stringify(state));
 async function waitForNative(timeout=5000){
   const started=Date.now();
@@ -46,7 +46,7 @@ $("#noteForm").onsubmit=async e=>{e.preventDefault();const title=$("#noteTitle")
 $("#settingsBtn").onclick=()=>state.setup?show("#settingsView"):show("#setupView");$("#saveName").onclick=()=>{state.displayName=$("#displayName").value.trim()||"Notes";save();$("#visibleTitle").textContent=state.displayName;show("#notesView")};
 document.querySelectorAll("[data-back]").forEach(b=>b.onclick=()=>show("#"+b.dataset.back));
 let setupBusy=false;function setSetupBusy(busy,message){setupBusy=busy;const btn=$("#finishSetup");if(!btn)return;btn.disabled=busy;btn.textContent=busy?(message||"Setting up…"):"Finish setup"}
-$("#finishSetup").onclick=async()=>{if(setupBusy)return;const secret=$("#secretName").value.trim(),pin=$("#pin").value.trim();$("#setupMsg").textContent="";if(!secret||!/^\d{6}$/.test(pin)||!selectedRecovery){$("#setupMsg").textContent="Complete the secret name, PIN and recovery choice first.";return}setSetupBusy(true,"Setting up…");try{Native=await waitForNative(8000);if(!Native)throw new Error("Private storage could not start.");await Native.saveCredential({secret,pin,removeOriginal:false});state.recovery=selectedRecovery;state.setup=true;save();show("#notesView")}catch(e){$("#setupMsg").textContent=e?.message||"Could not finish setup."}finally{setSetupBusy(false)}};
+$("#finishSetup").onclick=async()=>{if(setupBusy)return;const secret=$("#secretName").value.trim(),pin=$("#pin").value.trim();$("#setupMsg").textContent="";if(!secret||!/^\d{6}$/.test(pin)||!selectedRecovery){$("#setupMsg").textContent="Complete the secret name, PIN and recovery choice first.";return}setSetupBusy(true,"Setting up…");try{Native=await waitForNative(8000);if(!Native)throw new Error("Private storage could not start.");await Native.saveCredential({secret,pin,removeOriginal:false});state.setup=true;save();show("#notesView")}catch(e){$("#setupMsg").textContent=e?.message||"Could not finish setup."}finally{setSetupBusy(false)}};
 function triggerSecret(secret){if(!state.setup||!Native)return;pendingSecret=secret;$("#pinInput").value="";$("#unlockMsg").textContent="";show("#unlockView");setTimeout(()=>$("#pinInput").focus(),80)}
 $("#pinGo").onclick=unlock;$("#pinInput").addEventListener("keydown",e=>{if(e.key==="Enter")unlock()});
 $("#biometricBtn").onclick=async()=>{if(!Native)return;try{await Native.authenticateBiometric();pendingSecret="";show("#vaultView");await renderVault()}catch(e){$("#unlockMsg").textContent=e?.message||"Biometric authentication failed."}};
