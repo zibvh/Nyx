@@ -72,7 +72,7 @@ $("#finishSetup").onclick=async()=>{
  try{
    Native=await waitForNative(8000);
    if(!Native)throw new Error("NYX private storage could not start. Close and reopen the app, then try again.");
-   if(Native?.addListener){Native.addListener("deleteStatus",e=>{if(e?.manualDeleteRequired){alert("Original still exists. Your media is safely stored in NYX. Delete the original manually from Gallery/Files to complete the move.");}}).catch(()=>{});}
+   if(Native?.addListener){Promise.resolve(Native.addListener("deleteStatus",e=>{if(e?.manualDeleteRequired){alert("Original still exists. Your media is safely stored in NYX. Delete the original manually from Gallery/Files to complete the move.");}})).catch(()=>{});}
    $("#setupMsg").textContent="Creating encrypted private storage…";
    await Promise.race([Native.saveCredential({secret,pin,removeOriginal:$("#removeOriginalSetup").checked}),new Promise((_,reject)=>setTimeout(()=>reject(new Error("Private setup is taking too long. Please try again.")),15000))]);
    state.recovery=selectedRecovery;state.setup=true;save();
