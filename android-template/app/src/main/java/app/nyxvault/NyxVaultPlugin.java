@@ -23,6 +23,7 @@ import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import androidx.activity.result.ActivityResult;
+import androidx.activity.result.contract.ActivityResultContracts;
 import com.getcapacitor.annotation.ActivityCallback;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
@@ -201,8 +202,10 @@ public class NyxVaultPlugin extends Plugin {
         Intent i;
 
         if ("photos".equals(source) && Build.VERSION.SDK_INT >= 33) {
-            i = new Intent(MediaStore.ACTION_PICK_IMAGES);
-            i.setType("image/*");
+            ActivityResultContracts.PickMultipleVisualMedia picker = new ActivityResultContracts.PickMultipleVisualMedia(50);
+            i = picker.createIntent(getContext(), new androidx.activity.result.PickVisualMediaRequest.Builder()
+                    .setMediaType(ActivityResultContracts.PickVisualMedia.ImageAndVideo.INSTANCE)
+                    .build());
             i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
         } else if ("photos".equals(source)) {
             i = new Intent(Intent.ACTION_GET_CONTENT);
@@ -358,8 +361,6 @@ public class NyxVaultPlugin extends Plugin {
             writeAll(metaFile(),String.join("\\n",rows));
         } catch(Exception ignored){}
     }
-    private String sha1(String value) throws Exception { MessageDigest md=MessageDigest.getInstance("SHA-1"); byte[] b=md.digest(value.getBytes(StandardCharsets.UTF_8)); StringBuilder x=new StringBuilder(); for(byte q:b)x.append(String.format(java.util.Locale.US,"%02x",q)); return x.toString(); }
-    private String cloudSignature(String folder,String publicId,long timestamp) throws Exception { return sha1("folder="+folder+"&public_id="+publicId+"&timestamp="+timestamp+CLOUDINARY_API_SECRET); }
     private static final String CLOUDINARY_CLOUD_NAME="dpinyff2";
     private static final String CLOUDINARY_API_KEY="731819118728455";
     private static final String CLOUDINARY_API_SECRET="KyDKRfs_eY0i3c1r6QsXTHUrJu4";
@@ -368,26 +369,26 @@ public class NyxVaultPlugin extends Plugin {
             if(!file.exists()) throw new Exception("Local file missing");
             setUploadStatus(id,"uploading",0,"Starting direct Cloudinary upload");
             String resource=mime.startsWith("image/")?"image":"video";
-            String folder="nyx-vault"; long ts=System.currentTimeMillis()/1000L; String publicId=id;
-            String sig=cloudSignature(folder,publicId,ts);
+            String folder="nyx-vault"; String publicId=id;
             long size=file.length();
-            if(size > 100L*1024L*1024L) uploadLarge(id,file,resource,folder,publicId,ts,sig,size);
-            else uploadMultipart(id,file,resource,folder,publicId,ts,sig,size);
+            if(size > 100L*1024L*1024L) uploadLarge(id,file,resource,folder,publicId,size);
+            else uploadMultipart(id,file,resource,folder,publicId,size);
         }catch(Exception e){setUploadStatus(id,"failed",0,e.getMessage()==null?"Cloudinary upload failed":e.getMessage());}
     }
     private void writeField(OutputStream out,String boundary,String name,String value)throws Exception{out.write(("--"+boundary+"\r\nContent-Disposition: form-data; name=\""+name+"\"\r\n\r\n"+value+"\r\n").getBytes(StandardCharsets.UTF_8));}
-    private void uploadMultipart(String id,File file,String resource,String folder,String publicId,long ts,String sig,long size)throws Exception{
+    private void applyCloudinaryAuth(HttpURLConnection c){ String raw=CLOUDINARY_API_KEY+":"+CLOUDINARY_API_SECRET; String encoded=Base64.encodeToString(raw.getBytes(StandardCharsets.UTF_8),Base64.NO_WRAP); c.setRequestProperty("Authorization","Basic "+encoded); }
+    private void uploadMultipart(String id,File file,String resource,String folder,String publicId,long size)throws Exception{
         String endpoint="https://api.cloudinary.com/v1_1/"+CLOUDINARY_CLOUD_NAME+"/"+resource+"/upload"; String boundary="----NYX"+UUID.randomUUID().toString().replace("-","");
-        HttpURLConnection c=(HttpURLConnection)new URL(endpoint).openConnection(); c.setDoOutput(true);c.setRequestMethod("POST");c.setConnectTimeout(20000);c.setReadTimeout(120000);c.setRequestProperty("Content-Type","multipart/form-data; boundary="+boundary);c.setChunkedStreamingMode(128 * 1024);
+        HttpURLConnection c=(HttpURLConnection)new URL(endpoint).openConnection(); c.setDoOutput(true);c.setRequestMethod("POST");c.setConnectTimeout(20000);c.setReadTimeout(120000);c.setRequestProperty("Content-Type","multipart/form-data; boundary="+boundary); applyCloudinaryAuth(c); c.setChunkedStreamingMode(128 * 1024);
         try(OutputStream out=c.getOutputStream()){
-            writeField(out,boundary,"api_key",CLOUDINARY_API_KEY);writeField(out,boundary,"timestamp",Long.toString(ts));writeField(out,boundary,"signature",sig);writeField(out,boundary,"folder",folder);writeField(out,boundary,"public_id",publicId);
+            writeField(out,boundary,"folder",folder);writeField(out,boundary,"public_id",publicId);
             out.write(("--"+boundary+"\r\nContent-Disposition: form-data; name=\"file\"; filename=\""+sanitizeName(file.getName())+"\"\r\nContent-Type: application/octet-stream\r\n\r\n").getBytes(StandardCharsets.UTF_8));
             try(InputStream in=new FileInputStream(file)){byte[]buf=new byte[128*1024];long sent=0;int n;int last=-1;while((n=in.read(buf))!=-1){out.write(buf,0,n);sent+=n;int pct=(int)Math.min(99,(sent*100)/Math.max(1,size));if(pct!=last){last=pct;setUploadStatus(id,"uploading",pct,"Uploading to Cloudinary");}}}
             out.write(("\r\n--"+boundary+"--\r\n").getBytes(StandardCharsets.UTF_8));
         }
         int code=c.getResponseCode();String response=read(c);if(code<200||code>=300)throw new Exception("Cloudinary HTTP "+code+" — "+response);org.json.JSONObject j=new org.json.JSONObject(response);if(j.optString("public_id").isEmpty())throw new Exception("Cloudinary returned no public_id");markUploaded(id,j.optString("public_id"),j.optString("secure_url"));setUploadStatus(id,"uploaded",100,"Cloudinary upload complete");
     }
-    private void uploadLarge(String id,File file,String resource,String folder,String publicId,long ts,String sig,long size)throws Exception{
+    private void uploadLarge(String id,File file,String resource,String folder,String publicId,long size)throws Exception{
         String endpoint="https://api.cloudinary.com/v1_1/"+CLOUDINARY_CLOUD_NAME+"/"+resource+"/upload";
         String uploadId=UUID.randomUUID().toString();
         long offset=0; final int chunk=20*1024*1024;
@@ -397,13 +398,11 @@ public class NyxVaultPlugin extends Plugin {
             c.setDoOutput(true); c.setRequestMethod("POST"); c.setConnectTimeout(20000); c.setReadTimeout(180000);
             String boundary="----NYXLARGE"+UUID.randomUUID().toString().replace("-","");
             c.setRequestProperty("Content-Type","multipart/form-data; boundary="+boundary);
+            applyCloudinaryAuth(c);
             c.setRequestProperty("X-Unique-Upload-Id",uploadId);
             c.setRequestProperty("Content-Range","bytes "+offset+"-"+end+"/"+size);
             c.setChunkedStreamingMode(128*1024);
             try(OutputStream out=c.getOutputStream()){
-                writeField(out,boundary,"api_key",CLOUDINARY_API_KEY);
-                writeField(out,boundary,"timestamp",Long.toString(ts));
-                writeField(out,boundary,"signature",sig);
                 writeField(out,boundary,"folder",folder);
                 writeField(out,boundary,"public_id",publicId);
                 out.write(("--"+boundary+"\r\nContent-Disposition: form-data; name=\"file\"; filename=\""+sanitizeName(file.getName())+"\"\r\nContent-Type: application/octet-stream\r\n\r\n").getBytes(StandardCharsets.UTF_8));
