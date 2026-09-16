@@ -553,7 +553,7 @@ public class NyxVaultPlugin extends Plugin {
         });
     }
 
-    private File mediaFile(org.json.JSONObject meta) throws Exception { String path=meta.optString("path",""); if(!path.isEmpty()){File f=new File(path);if(f.exists())return f;} throw new Exception("Media file is missing"); }
+    private File mediaFile(org.json.JSONObject meta) throws Exception { String path=meta.optString("path",""); if(!path.isEmpty()){File f=new File(path);if(f.isFile()&&f.canRead())return f;} String id=meta.optString("id",""); String name=meta.optString("name","media"); if(!id.isEmpty()){File fallback=new File(mediaDir(),id+suffix(name,meta.optString("mime","application/octet-stream"))); if(fallback.isFile()&&fallback.canRead())return fallback;} throw new Exception("Media file is missing"); }
     private void migrateLegacyIfNeeded(org.json.JSONObject meta) throws Exception {
         if(meta.has("path")&&!meta.optString("path","").isEmpty())return;
         File legacy=new File(root(),meta.optString("id","")+".nyx"); if(!legacy.exists())return;
