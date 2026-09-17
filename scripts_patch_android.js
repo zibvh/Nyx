@@ -41,6 +41,11 @@ if(fs.existsSync(manifest)){
   if(!m.includes('android.permission.INTERNET')) m=m.replace('<manifest ', '<manifest ');
   if(!m.includes('android:name=\"android.permission.INTERNET\"')) m=m.replace(/<manifest([^>]*)>/, '<manifest$1>\n    <uses-permission android:name=\"android.permission.INTERNET\" />');
   if(!m.includes('android:name=\"android.permission.WRITE_EXTERNAL_STORAGE\"')) m=m.replace(/<manifest([^>]*)>/, '<manifest$1>\n    <uses-permission android:name=\"android.permission.WRITE_EXTERNAL_STORAGE\" android:maxSdkVersion=\"28\" />');
+  // Android 12+ media-management special access. The manifest declaration is required for the system to expose the Media management switch.
+  if(!m.includes('android:name="android.permission.MANAGE_MEDIA"')) m=m.replace(/<manifest([^>]*)>/, '<manifest$1>\n    <uses-permission android:name="android.permission.MANAGE_MEDIA" />');
+  if(!m.includes('android:name="android.permission.READ_EXTERNAL_STORAGE"')) m=m.replace(/<manifest([^>]*)>/, '<manifest$1>\n    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />');
+  if(!m.includes('android:name="android.permission.READ_MEDIA_IMAGES"')) m=m.replace(/<manifest([^>]*)>/, '<manifest$1>\n    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />');
+  if(!m.includes('android:name="android.permission.READ_MEDIA_VIDEO"')) m=m.replace(/<manifest([^>]*)>/, '<manifest$1>\n    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />');
   m=m.replace(/android:icon="[^"]+"/,'android:icon="@drawable/nyx_logo"');
   m=m.replace(/android:roundIcon="[^"]+"/,'android:roundIcon="@drawable/nyx_logo"');
     if(!m.includes('NyxMediaViewerActivity')){
