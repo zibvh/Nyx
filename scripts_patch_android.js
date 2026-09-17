@@ -3,7 +3,7 @@ const path=require('path');
 const root=path.resolve('android');
 const pkg=path.join(root,'app','src','main','java','app','nyxvault');
 fs.mkdirSync(pkg,{recursive:true});
-for(const f of ['NyxVaultPlugin.java','NyxMediaViewerActivity.java']) fs.copyFileSync(path.join('android-template','app','src','main','java','app','nyxvault',f),path.join(pkg,f));
+for(const f of ['NyxVaultPlugin.java','NyxMediaViewerActivity.java','NyxUploadWorker.java']) fs.copyFileSync(path.join('android-template','app','src','main','java','app','nyxvault',f),path.join(pkg,f));
 function findMain(dir){
   for(const n of fs.readdirSync(dir,{withFileTypes:true})){
     const p=path.join(dir,n.name);
@@ -38,6 +38,8 @@ fs.copyFileSync(path.join('android-template','app','src','main','res','drawable-
 const manifest=path.join(root,'app','src','main','AndroidManifest.xml');
 if(fs.existsSync(manifest)){
   let m=fs.readFileSync(manifest,'utf8');
+  if(!m.includes('android.permission.INTERNET')) m=m.replace('<manifest ', '<manifest ');
+  if(!m.includes('android:name=\"android.permission.INTERNET\"')) m=m.replace(/<manifest([^>]*)>/, '<manifest$1>\n    <uses-permission android:name=\"android.permission.INTERNET\" />');
   m=m.replace(/android:icon="[^"]+"/,'android:icon="@drawable/nyx_logo"');
   m=m.replace(/android:roundIcon="[^"]+"/,'android:roundIcon="@drawable/nyx_logo"');
     if(!m.includes('NyxMediaViewerActivity')){
@@ -55,7 +57,8 @@ const gradle=path.join(root,'app','build.gradle');
 let g=fs.readFileSync(gradle,'utf8');
 if(!g.includes('androidx.biometric:biometric')){
   g=g.replace(/dependencies \{/,`dependencies {\n    implementation 'androidx.biometric:biometric:1.1.0'\n    implementation 'androidx.media3:media3-exoplayer:1.5.1'
-    implementation 'androidx.media3:media3-ui:1.5.1'`);
+    implementation 'androidx.media3:media3-ui:1.5.1'
+    implementation 'androidx.work:work-runtime:2.9.1'`);
 }
 // Configure release signing. GitHub Actions recreates nyx-release.jks inside android/
 // from the NYX_KEYSTORE_BASE64 repository secret before running this script.

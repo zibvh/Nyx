@@ -16,7 +16,7 @@ if(window.Capacitor){
 
 }
 const notes=JSON.parse(localStorage.getItem("nyx_notes")||"[]");
-const state=JSON.parse(localStorage.getItem("nyx_state")||'{"setup":false,"displayName":"Notes","recovery":null}');
+const state=JSON.parse(localStorage.getItem("nyx_state")||'{"setup":false,"displayName":"Notes"}');
 let pendingSecret="", activeMediaId="";
 const save=()=>localStorage.setItem("nyx_state",JSON.stringify(state));
 async function waitForNative(timeout=5000){
@@ -35,11 +35,42 @@ const show=id=>{document.querySelectorAll(".view").forEach(x=>x.classList.remove
 const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]));
 function renderNotes(){$("#notesList").innerHTML=notes.length?notes.map(n=>`<article class="note"><h3>${esc(n.title||"Untitled")}</h3><p>${esc(n.body)}</p><small>${new Date(n.createdAt).toLocaleString()}</small></article>`).join(""):`<p class="muted">No notes yet.</p>`}
 const thumbCache={};
-async function renderVault(){if(!Native){$("#vaultGrid").innerHTML='<p class="muted">Private storage is available in the Android build.</p>';return}try{const r=await Native.listMedia(),items=r.items||[];const grid=$("#vaultGrid");if(!items.length){grid.innerHTML='<p class="muted">No private media yet.</p>';return}const wanted=new Set(items.map(m=>String(m.id)));grid.querySelectorAll('.media').forEach(card=>{if(!wanted.has(String(card.dataset.id)))card.remove()});const existing=new Set([...grid.querySelectorAll('.media')].map(x=>String(x.dataset.id)));for(const m of items){if(existing.has(String(m.id))){const label=grid.querySelector(`[data-id="${CSS.escape(String(m.id))}"] span`);if(label)label.textContent=m.name||"MEDIA";continue;}const card=document.createElement('button');card.className='media media-enter';card.dataset.id=m.id;card.innerHTML=`<div class="media-placeholder" id="thumb-${esc(m.id)}">${m.mime?.startsWith("video/")?"VIDEO":"PHOTO"}</div><span>${esc(m.name||"MEDIA")}</span>`;grid.appendChild(card);requestAnimationFrame(()=>card.classList.add('ready'));loadThumb(m)}}catch{$("#vaultGrid").innerHTML='<p class="muted">No private media yet.</p>'}}
+async function renderVault(){
+  if(!Native){$("#vaultGrid").innerHTML="";$("#vaultEmpty").textContent="Private storage is unavailable.";$("#vaultEmpty").style.display="block";return}
+  try{
+    const r=await Native.listMedia(),items=r.items||[];
+    const grid=$("#vaultGrid"),empty=$("#vaultEmpty");
+    grid.innerHTML="";
+    empty.style.display=items.length?"none":"block";
+    for(const m of items){
+      const card=document.createElement("button");
+      card.className="media media-enter";card.dataset.id=m.id;
+      card.innerHTML=`<div class="media-placeholder" id="thumb-${esc(m.id)}">${m.mime?.startsWith("video/")?"VIDEO":"PHOTO"}</div><span>${esc(m.name||"MEDIA")}</span>`;
+      grid.appendChild(card);requestAnimationFrame(()=>card.classList.add("ready"));loadThumb(m);
+    }
+  }catch(e){$("#vaultGrid").innerHTML="";$("#vaultEmpty").textContent="Private storage is unavailable.";$("#vaultEmpty").style.display="block"}
+}
 async function loadThumb(m){const key=String(m.id);if(thumbCache[key]){const holder=$("#thumb-"+CSS.escape(key));if(holder)holder.innerHTML=`<img src="${thumbCache[key]}" alt="">`;return}try{const r=await Native.getThumbnail({id:m.id});if(r.data){const uri=`data:${r.mime||"image/jpeg"};base64,${r.data}`;thumbCache[key]=uri;const holder=$("#thumb-"+CSS.escape(key));if(holder)holder.innerHTML=`<img src="${uri}" alt="">`}}catch{}}
 async function unlock(){const pin=$("#pinInput").value.trim();if(!/^\d{6}$/.test(pin)||!pendingSecret){$("#unlockMsg").textContent="Enter your 6-digit PIN.";return}try{const r=await Native.verifyCredential({secret:pendingSecret,pin});if(r.ok){pendingSecret="";$("#pinInput").value="";show("#vaultView");await renderVault()}else{$("#unlockMsg").textContent="Wrong PIN.";$("#pinInput").select()}}catch{$("#unlockMsg").textContent="Could not unlock."}}
 $("#noteForm").onsubmit=async e=>{e.preventDefault();const title=$("#noteTitle").value.trim(),body=$("#noteBody").value.trim();if(!title&&!body)return;if(state.setup&&Native&&title){try{const r=await Native.verifySecret({secret:title});if(r?.ok){e.target.reset();triggerSecret(title);return}}catch{}}notes.unshift({title,body,createdAt:Date.now()});localStorage.setItem("nyx_notes",JSON.stringify(notes));e.target.reset();renderNotes()};
-$("#settingsBtn").onclick=()=>state.setup?show("#settingsView"):show("#setupView");$("#saveName").onclick=()=>{state.displayName=$("#displayName").value.trim()||"Notes";save();$("#visibleTitle").textContent=state.displayName;show("#notesView")};
+$("#settingsBtn").onclick=()=>state.setup?show("#settingsView"):show("#setupView");
+$("#saveName").onclick=()=>{state.displayName=$("#displayName").value.trim()||"Notes";save();$("#visibleTitle").textContent=state.displayName;show("#notesView")};
+$("#vaultSettingsBtn").onclick=()=>{
+  $("#currentSecret").value="";$("#currentPin").value="";$("#newSecret").value="";$("#newPin").value="";$("#securityMsg").textContent="";show("#vaultSettingsView");
+};
+$("#changeCredentialBtn").onclick=async()=>{
+  const oldSecret=$("#currentSecret").value.trim(),oldPin=$("#currentPin").value.trim(),newSecret=$("#newSecret").value.trim(),newPin=$("#newPin").value.trim();
+  $("#securityMsg").textContent="";
+  if(!oldSecret||!/^[0-9]{6}$/.test(oldPin)){$("#securityMsg").textContent="Enter your current secret name and PIN.";return}
+  if(!newSecret&&!newPin){$("#securityMsg").textContent="Enter a new secret name or PIN.";return}
+  if(newPin&&!/^[0-9]{6}$/.test(newPin)){$("#securityMsg").textContent="New PIN must be exactly 6 digits.";return}
+  try{
+    Native=await waitForNative(8000);if(!Native)throw new Error("Private storage could not start.");
+    await Native.changeCredential({oldSecret,oldPin,newSecret,newPin});
+    $("#securityMsg").textContent="Security details changed.";
+    $("#currentSecret").value="";$("#currentPin").value="";$("#newSecret").value="";$("#newPin").value="";
+  }catch(e){$("#securityMsg").textContent=e?.message||"Could not change security details."}
+};
 document.querySelectorAll("[data-back]").forEach(b=>b.onclick=()=>show("#"+b.dataset.back));
 let setupBusy=false;function setSetupBusy(busy,message){setupBusy=busy;const btn=$("#finishSetup");if(!btn)return;btn.disabled=busy;btn.textContent=busy?(message||"Setting up…"):"Finish setup"}
 $("#finishSetup").onclick=async()=>{if(setupBusy)return;const secret=$("#secretName").value.trim(),pin=$("#pin").value.trim();$("#setupMsg").textContent="";if(!secret||!/^\d{6}$/.test(pin)){$("#setupMsg").textContent="Enter a secret name and a valid 6-digit PIN.";return}setSetupBusy(true,"Setting up…");try{Native=await waitForNative(8000);if(!Native)throw new Error("Private storage could not start.");await Native.saveCredential({secret,pin,removeOriginal:false});state.setup=true;save();show("#notesView")}catch(e){$("#setupMsg").textContent=e?.message||"Could not finish setup."}finally{setSetupBusy(false)}};
@@ -48,7 +79,8 @@ $("#pinGo").onclick=unlock;$("#pinInput").addEventListener("keydown",e=>{if(e.ke
 $("#biometricBtn").onclick=async()=>{if(!Native)return;try{await Native.authenticateBiometric();pendingSecret="";show("#vaultView");await renderVault()}catch(e){$("#unlockMsg").textContent=e?.message||"Biometric authentication failed."}};
 $("#lockBtn").onclick=async()=>{pendingSecret="";activeMediaId="";show("#notesView");Native?.clearTempCache?.().catch?.(()=>{})};
 $("#importBtn").onclick=()=>show("#pickerView");
-async function choosePicker(source){try{const r=await Native.pickMedia({source});if(r?.imported){await renderVault();setTimeout(()=>show("#vaultView"),200)}}catch(e){}}
+async function syncUploads(){try{if(Native) await Native.syncUploads()}catch(e){}}
+async function choosePicker(source){try{const r=await Native.pickMedia({source});if(r?.imported){await syncUploads();await renderVault();setTimeout(()=>show("#vaultView"),200)}}catch(e){}}
 $("#pickPhotos").onclick=()=>choosePicker("photos");$("#pickFiles").onclick=()=>choosePicker("files");
 $("#vaultGrid").addEventListener("click",async e=>{const b=e.target.closest(".media");if(!b||!Native)return;try{await Native.openMedia({id:b.dataset.id})}catch(e){}});$("#visibleTitle").textContent=state.displayName||"Notes";$("#displayName").value=state.displayName||"Notes";renderNotes();
-window.addEventListener("load",()=>{show(state.setup?"#notesView":"#setupView");setTimeout(()=>$("#splash")?.classList.add("hide"),1200)});
+window.addEventListener("load",async()=>{show(state.setup?"#notesView":"#setupView");if(state.setup){Native=await waitForNative(8000);await syncUploads()}setTimeout(()=>$("#splash")?.classList.add("hide"),1200)});

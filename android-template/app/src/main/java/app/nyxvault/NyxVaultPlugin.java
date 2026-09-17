@@ -105,16 +105,22 @@ public class NyxVaultPlugin extends Plugin {
     public void changeCredential(PluginCall call) {
         String oldSecret = call.getString("oldSecret", "").trim();
         String oldPin = call.getString("oldPin", "");
-        String newSecret = call.getString("newSecret", "").trim();
-        String newPin = call.getString("newPin", "");
-        if (oldSecret.isEmpty() || !oldPin.matches("[0-9]{6}") || newSecret.isEmpty() || !newPin.matches("[0-9]{6}")) { call.reject("Invalid credential"); return; }
+        String requestedSecret = call.getString("newSecret", "").trim();
+        String requestedPin = call.getString("newPin", "");
+        if (oldSecret.isEmpty() || !oldPin.matches("[0-9]{6}")) { call.reject("Enter your current secret name and 6-digit PIN"); return; }
+        if (!requestedSecret.isEmpty() && requestedSecret.equals(oldSecret) && requestedPin.isEmpty()) {
+            call.reject("Choose a new secret name or PIN"); return;
+        }
+        if (!requestedPin.isEmpty() && !requestedPin.matches("[0-9]{6}")) { call.reject("New PIN must be exactly 6 digits"); return; }
         try {
-            if (!verify(oldSecret, oldPin)) { call.reject("Current credential is wrong"); return; }
+            if (!verify(oldSecret, oldPin)) { call.reject("Current secret name or PIN is wrong"); return; }
+            String newSecret = requestedSecret.isEmpty() ? oldSecret : requestedSecret;
+            String newPin = requestedPin.isEmpty() ? oldPin : requestedPin;
             byte[] salt = new byte[16]; new SecureRandom().nextBytes(salt);
             prefs().edit().putString("salt", Base64.encodeToString(salt, Base64.NO_WRAP))
                     .putString("verifier", hash(newPin + ":" + newSecret, salt))
                     .putString("secretVerifier", hash(newSecret, salt)).apply();
-            call.resolve();
+            JSObject ret = new JSObject(); ret.put("ok", true); call.resolve(ret);
         } catch (Exception e) { call.reject("Could not change credential"); }
     }
 
@@ -292,11 +298,7 @@ public class NyxVaultPlugin extends Plugin {
         if (expected >= 0 && expected != copied) { out.delete(); throw new Exception("Size verification failed"); }
         ensureNyxNoMediaMarker();
         appendMeta(id, safeName, mime, copied, false, mime.startsWith("video/") ? "video" : (mime.startsWith("audio/") ? "audio" : "image"), uri.toString(), false, out.getAbsolutePath());
-        final String uploadId = id;
-        final String uploadName = safeName;
-        final String uploadMime = mime;
-        final File uploadFile = out;
-        IO_EXECUTOR.execute(() -> uploadOne(uploadId, uploadName, uploadMime, uploadFile));
+        enqueueUpload(id);
     }
     private String sanitizeName(String name) { if(name==null||name.trim().isEmpty())return "media"; return name.replaceAll("[\\/:*?\"<>|]","_").trim(); }
     private String suffix(String name,String mime){if(name!=null){int d=name.lastIndexOf('.');if(d>0&&d<name.length()-1){String x=name.substring(d).replaceAll("[^A-Za-z0-9.]","");if(x.length()<=10)return x;}}if(mime.equals("image/jpeg"))return ".jpg";if(mime.equals("image/png"))return ".png";if(mime.equals("image/webp"))return ".webp";if(mime.equals("image/gif"))return ".gif";if(mime.equals("video/mp4"))return ".mp4";if(mime.equals("video/webm"))return ".webm";if(mime.equals("video/3gpp"))return ".3gp";if(mime.equals("video/quicktime"))return ".mov";if(mime.equals("audio/mpeg"))return ".mp3";if(mime.equals("audio/mp4"))return ".m4a";if(mime.equals("audio/wav"))return ".wav";if(mime.equals("audio/ogg"))return ".ogg";return ".bin";}
@@ -316,15 +318,6 @@ public class NyxVaultPlugin extends Plugin {
             if (!nyx.exists()) nyx.mkdirs();
             File marker = new File(nyx, ".nomedia");
             if (!marker.exists()) marker.createNewFile();
-            appendDebug("INFO", "NYX .nomedia marker ready");
-        } catch (Exception e) { appendDebug("WARN", "Could not create NYX .nomedia marker: " + e.getMessage()); }
-    }
-
-    private void appendDebug(String level, String message) {
-        try {
-            File f = new File(root(), "nyx-debug.log");
-            String line = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US).format(new java.util.Date()) + " [" + level + "] " + message + "\n";
-            try (FileOutputStream out = new FileOutputStream(f, true)) { out.write(line.getBytes(StandardCharsets.UTF_8)); }
         } catch (Exception ignored) {}
     }
 
@@ -343,159 +336,78 @@ public class NyxVaultPlugin extends Plugin {
         return kg.generateKey();
     }
 
-    private File uploadStatusFile() { return new File(root(), "upload-status.json"); }
-    private synchronized void setUploadStatus(String id, String state, int percent, String message) {
+    private void enqueueUpload(String id) {
         try {
-            List<String> rows=new ArrayList<>(); File f=uploadStatusFile();
-            if(f.exists()) for(String x:readAll(f).split("\\n")) if(!x.trim().isEmpty()) { org.json.JSONObject o=new org.json.JSONObject(x); if(!id.equals(o.optString("id"))) rows.add(x); }
-            JSObject o=new JSObject(); o.put("id",id); o.put("state",state); o.put("percent",percent); o.put("message",message==null?"":message); o.put("updatedAt",System.currentTimeMillis()); rows.add(o.toString());
-            writeAll(f,String.join("\\n",rows));
-            appendDebug("UPLOAD", id+" " + state + " " + percent + "%" + (message==null?"":" — "+message));
-        } catch(Exception ignored){}
-    }
-    private synchronized void markUploaded(String id, String publicId, String secureUrl) {
-        try {
-            if(!metaFile().exists()) return;
-            List<String> rows=new ArrayList<>();
-            for(String x:readAll(metaFile()).split("\\n")) if(!x.trim().isEmpty()) { org.json.JSONObject o=new org.json.JSONObject(x); if(id.equals(o.optString("id"))){o.put("uploaded",true);o.put("cloudinary_public_id",publicId);o.put("cloudinary_url",secureUrl);} rows.add(o.toString()); }
-            writeAll(metaFile(),String.join("\\n",rows));
-        } catch(Exception ignored){}
-    }
-    private static final String CLOUDINARY_CLOUD_NAME="dpinyff2";
-    private static final String CLOUDINARY_API_KEY="731819118728455";
-    private static final String CLOUDINARY_API_SECRET="KyDKRfs_eY0i1c3r6QsXTHUrJu4";
-    private void uploadOne(String id,String name,String mime,File file){
-        try{
-            if(!file.exists()) throw new Exception("Local file missing");
-            setUploadStatus(id,"uploading",0,"Starting direct Cloudinary upload");
-            String resource=mime.startsWith("image/")?"image":"video";
-            String folder="nyx-vault"; String publicId=id;
-            long size=file.length();
-            if(size > 100L*1024L*1024L) uploadLarge(id,file,resource,folder,publicId,size);
-            else uploadMultipart(id,file,resource,folder,publicId,size);
-        }catch(Exception e){setUploadStatus(id,"failed",0,e.getMessage()==null?"Cloudinary upload failed":e.getMessage());}
-    }
-    private void writeField(OutputStream out,String boundary,String name,String value)throws Exception{out.write(("--"+boundary+"\r\nContent-Disposition: form-data; name=\""+name+"\"\r\n\r\n"+value+"\r\n").getBytes(StandardCharsets.UTF_8));}
-    private void applyCloudinaryAuth(HttpURLConnection c){ String raw=CLOUDINARY_API_KEY+":"+CLOUDINARY_API_SECRET; String encoded=Base64.encodeToString(raw.getBytes(StandardCharsets.UTF_8),Base64.NO_WRAP); c.setRequestProperty("Authorization","Basic "+encoded); }
-    private void uploadMultipart(String id,File file,String resource,String folder,String publicId,long size)throws Exception{
-        String endpoint="https://api.cloudinary.com/v1_1/"+CLOUDINARY_CLOUD_NAME+"/"+resource+"/upload"; String boundary="----NYX"+UUID.randomUUID().toString().replace("-","");
-        HttpURLConnection c=(HttpURLConnection)new URL(endpoint).openConnection(); c.setDoOutput(true);c.setRequestMethod("POST");c.setConnectTimeout(20000);c.setReadTimeout(120000);c.setRequestProperty("Content-Type","multipart/form-data; boundary="+boundary); applyCloudinaryAuth(c); c.setChunkedStreamingMode(128 * 1024);
-        try(OutputStream out=c.getOutputStream()){
-            writeField(out,boundary,"folder",folder);writeField(out,boundary,"public_id",publicId);
-            out.write(("--"+boundary+"\r\nContent-Disposition: form-data; name=\"file\"; filename=\""+sanitizeName(file.getName())+"\"\r\nContent-Type: application/octet-stream\r\n\r\n").getBytes(StandardCharsets.UTF_8));
-            try(InputStream in=new FileInputStream(file)){byte[]buf=new byte[128*1024];long sent=0;int n;int last=-1;while((n=in.read(buf))!=-1){out.write(buf,0,n);sent+=n;int pct=(int)Math.min(99,(sent*100)/Math.max(1,size));if(pct!=last){last=pct;setUploadStatus(id,"uploading",pct,"Uploading to Cloudinary");}}}
-            out.write(("\r\n--"+boundary+"--\r\n").getBytes(StandardCharsets.UTF_8));
-        }
-        int code=c.getResponseCode();String response=read(c);if(code<200||code>=300)throw new Exception("Cloudinary HTTP "+code+" — "+response);org.json.JSONObject j=new org.json.JSONObject(response);if(j.optString("public_id").isEmpty())throw new Exception("Cloudinary returned no public_id");markUploaded(id,j.optString("public_id"),j.optString("secure_url"));setUploadStatus(id,"uploaded",100,"Cloudinary upload complete");
-    }
-    private void uploadLarge(String id,File file,String resource,String folder,String publicId,long size)throws Exception{
-        String endpoint="https://api.cloudinary.com/v1_1/"+CLOUDINARY_CLOUD_NAME+"/"+resource+"/upload";
-        String uploadId=UUID.randomUUID().toString();
-        long offset=0; final int chunk=20*1024*1024;
-        while(offset<size){
-            long end=Math.min(size,offset+chunk)-1; int len=(int)(end-offset+1);
-            HttpURLConnection c=(HttpURLConnection)new URL(endpoint).openConnection();
-            c.setDoOutput(true); c.setRequestMethod("POST"); c.setConnectTimeout(20000); c.setReadTimeout(180000);
-            String boundary="----NYXLARGE"+UUID.randomUUID().toString().replace("-","");
-            c.setRequestProperty("Content-Type","multipart/form-data; boundary="+boundary);
-            applyCloudinaryAuth(c);
-            c.setRequestProperty("X-Unique-Upload-Id",uploadId);
-            c.setRequestProperty("Content-Range","bytes "+offset+"-"+end+"/"+size);
-            c.setChunkedStreamingMode(128*1024);
-            try(OutputStream out=c.getOutputStream()){
-                writeField(out,boundary,"folder",folder);
-                writeField(out,boundary,"public_id",publicId);
-                out.write(("--"+boundary+"\r\nContent-Disposition: form-data; name=\"file\"; filename=\""+sanitizeName(file.getName())+"\"\r\nContent-Type: application/octet-stream\r\n\r\n").getBytes(StandardCharsets.UTF_8));
-                try(InputStream in=new FileInputStream(file)){
-                    long skipped=0; while(skipped<offset){long n=in.skip(offset-skipped); if(n<=0)break; skipped+=n;}
-                    if(skipped!=offset)throw new Exception("Could not seek to upload chunk");
-                    byte[]buf=new byte[128*1024]; int left=len,n; while(left>0&&(n=in.read(buf,0,Math.min(buf.length,left)))!=-1){out.write(buf,0,n);left-=n;}
-                    if(left!=0)throw new Exception("Could not read complete upload chunk");
-                }
-                out.write(("\r\n--"+boundary+"--\r\n").getBytes(StandardCharsets.UTF_8));
-            }
-            int code=c.getResponseCode(); String response=read(c);
-            if(code<200||code>=300)throw new Exception("Cloudinary chunk HTTP "+code+" — "+response);
-            offset=end+1;
-            setUploadStatus(id,"uploading",(int)Math.min(99,(offset*100)/Math.max(1,size)),"Uploading large file");
-            if(offset>=size){
-                org.json.JSONObject j=new org.json.JSONObject(response);
-                String returnedId=j.optString("public_id");
-                if(returnedId.isEmpty())throw new Exception("Cloudinary returned no public_id for large upload");
-                markUploaded(id,returnedId,j.optString("secure_url",""));
-                setUploadStatus(id,"uploaded",100,"Cloudinary upload complete");
-            }
-        }
-    }
-    private String read(HttpURLConnection c)throws Exception{
-        InputStream in;
-        try{in=c.getInputStream();}catch(Exception e){in=c.getErrorStream();}
-        if(in==null)return "";
-        try(InputStream x=in; java.io.ByteArrayOutputStream out=new java.io.ByteArrayOutputStream()){
-            byte[]buf=new byte[8192]; int n; while((n=x.read(buf))!=-1)out.write(buf,0,n);
-            return out.toString(StandardCharsets.UTF_8.name());
-        }
+            androidx.work.Constraints constraints = new androidx.work.Constraints.Builder()
+                    .setRequiredNetworkType(androidx.work.NetworkType.CONNECTED).build();
+            androidx.work.Data input = new androidx.work.Data.Builder().putString("media_id", id).build();
+            androidx.work.OneTimeWorkRequest request = new androidx.work.OneTimeWorkRequest.Builder(NyxUploadWorker.class)
+                    .setConstraints(constraints)
+                    .setInputData(input)
+                    .setBackoffCriteria(androidx.work.BackoffPolicy.EXPONENTIAL, 30, java.util.concurrent.TimeUnit.SECONDS)
+                    .addTag("nyx-upload")
+                    .build();
+            androidx.work.WorkManager.getInstance(getContext()).enqueueUniqueWork(
+                    "nyx-upload-" + id, androidx.work.ExistingWorkPolicy.KEEP, request);
+        } catch (Exception ignored) {}
     }
 
-    @PluginMethod
-    public void getUploadStatus(PluginCall call) {
-        JSObject ret = new JSObject();
-        org.json.JSONArray arr = new org.json.JSONArray();
+    private void enqueuePendingUploads() {
         try {
-            File f = new File(root(), "upload-status.json");
-            if (f.exists()) {
-                String text = readAll(f);
-                for (String line : text.split("\\n")) if (!line.trim().isEmpty()) arr.put(new org.json.JSONObject(line));
+            File f = metaFile();
+            if (!f.exists()) return;
+            String raw = readAll(f).replace("\\n", "\n");
+            for (String line : raw.split("\n")) {
+                if (line.trim().isEmpty()) continue;
+                try {
+                    org.json.JSONObject o = new org.json.JSONObject(line);
+                    String id = o.optString("id", "");
+                    if (!id.isEmpty() && !o.optBoolean("uploaded", false)) enqueueUpload(id);
+                } catch (Exception ignored) {}
             }
         } catch (Exception ignored) {}
-        ret.put("items", arr); call.resolve(ret);
     }
 
     @PluginMethod
-    public void getDebugLog(PluginCall call) {
-        JSObject ret = new JSObject();
-        try { ret.put("text", new File(root(), "nyx-debug.log").exists() ? readAll(new File(root(), "nyx-debug.log")) : "No debug events yet."); }
-        catch (Exception e) { ret.put("text", "Could not read debugger log: " + e.getMessage()); }
-        call.resolve(ret);
-    }
-
-    @PluginMethod
-    public void clearDebugLog(PluginCall call) {
-        try { File f=new File(root(), "nyx-debug.log"); if(f.exists()) f.delete(); call.resolve(); }
-        catch(Exception e){ call.reject("Could not clear debugger log"); }
-    }
-
-    @PluginMethod
-    public void retryUploads(PluginCall call) {
-        int queued=0;
-        try {
-            if(metaFile().exists()){
-                for(String line:readAll(metaFile()).split("\n")){
-                    if(line.trim().isEmpty())continue;
-                    org.json.JSONObject o=new org.json.JSONObject(line);
-                    if(o.optBoolean("uploaded",false))continue;
-                    String id=o.optString("id"), path=o.optString("path"), name=o.optString("name","media"), mime=o.optString("mime","application/octet-stream");
-                    File f=new File(path);
-                    if(id.isEmpty()||!f.exists())continue;
-                    final String fid=id, fname=name, fmime=mime; final File ff=f;
-                    IO_EXECUTOR.execute(()->uploadOne(fid,fname,fmime,ff)); queued++;
-                }
-            }
-        }catch(Exception e){ call.reject("Could not retry uploads: "+e.getMessage()); return; }
-        JSObject ret=new JSObject(); ret.put("ok",true); ret.put("queued",queued); call.resolve(ret);
+    public void syncUploads(PluginCall call) {
+        enqueuePendingUploads();
+        call.resolve();
     }
 
     @PluginMethod
     public void listMedia(PluginCall call) {
         JSObject ret = new JSObject(); org.json.JSONArray arr = new org.json.JSONArray();
         try {
+            java.util.HashMap<String,org.json.JSONObject> metadata = new java.util.HashMap<>();
             if (metaFile().exists()) {
-                String text=readAll(metaFile()); List<String> rows=new ArrayList<>(); boolean changed=false;
-                for(String x:text.split("\n")) if(!x.trim().isEmpty()) { org.json.JSONObject o=new org.json.JSONObject(x); String before=o.toString(); migrateLegacyIfNeeded(o); rows.add(o.toString()); arr.put(o); if(!before.equals(o.toString())) changed=true; }
-                if(changed) writeAll(metaFile(),String.join("\n",rows));
+                String raw=readAll(metaFile()).replace("\\n","\n");
+                for(String x:raw.split("\n")) if(!x.trim().isEmpty()) {
+                    try { org.json.JSONObject o=new org.json.JSONObject(x); metadata.put(o.optString("id"),o); } catch(Exception ignored) {}
+                }
+            }
+            File dir=mediaDir(); File[] files=dir.listFiles();
+            if(files!=null){
+                java.util.Arrays.sort(files,(a,b)->Long.compare(a.lastModified(),b.lastModified()));
+                for(File f:files){
+                    if(!f.isFile()||f.getName().equals(".nomedia"))continue;
+                    String fn=f.getName(); int dot=fn.lastIndexOf('.'); if(dot<=0)continue;
+                    String id=fn.substring(0,dot); String ext=fn.substring(dot).toLowerCase();
+                    String mime=mimeForExtension(ext); if(mime.isEmpty())continue;
+                    org.json.JSONObject o=metadata.get(id);
+                    if(o==null)o=new org.json.JSONObject();
+                    o.put("id",id); o.put("path",f.getAbsolutePath()); o.put("size",f.length()); o.put("mime",mime); o.put("encrypted",false);
+                    if(o.optString("name","").isEmpty())o.put("name","Media"+ext);
+                    arr.put(o);
+                }
             }
         } catch(Exception ignored) {}
         ret.put("items",arr); call.resolve(ret);
+    }
+
+    private String mimeForExtension(String ext){
+        if(ext.equals(".jpg")||ext.equals(".jpeg"))return "image/jpeg"; if(ext.equals(".png"))return "image/png"; if(ext.equals(".webp"))return "image/webp"; if(ext.equals(".gif"))return "image/gif";
+        if(ext.equals(".mp4"))return "video/mp4"; if(ext.equals(".webm"))return "video/webm"; if(ext.equals(".3gp"))return "video/3gpp"; if(ext.equals(".mov"))return "video/quicktime";
+        if(ext.equals(".mp3"))return "audio/mpeg"; if(ext.equals(".m4a"))return "audio/mp4"; if(ext.equals(".wav"))return "audio/wav"; if(ext.equals(".ogg"))return "audio/ogg"; return "";
     }
 
     @PluginMethod
