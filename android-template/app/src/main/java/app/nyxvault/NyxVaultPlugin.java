@@ -10,6 +10,10 @@ import android.graphics.BitmapFactory;
 import android.util.Size;
 import android.media.MediaMetadataRetriever;
 import android.os.Build;
+import android.os.Environment;
+import android.provider.Settings;
+import android.Manifest;
+import android.media.MediaScannerConnection;
 import android.view.Window;
 import android.view.WindowManager;
 
@@ -68,11 +72,63 @@ public class NyxVaultPlugin extends Plugin {
     private static final int PBKDF2_ITERATIONS = 150000;
     private static final int GCM_TAG_BITS = 128;
     private static final int PICK_CODE = 7137;
+    private static final int DELETE_REQUEST_CODE = 7138;
+    private static final int STRATEGY_DIRECT = 1;
+    private static final int STRATEGY_CONSENT = 2;
+    private static final int STRATEGY_MANAGE_MEDIA = 3;
+    private static final String PREF_CONCEAL_STRATEGY = "concealStrategy";
+    private PluginCall pendingConcealCall;
+    private String pendingConcealId = "";
 
     private File root() { File d = new File(getContext().getFilesDir(), ROOT); if (!d.exists()) d.mkdirs(); return d; }
-    private File mediaDir() { File base = getContext().getExternalFilesDir(null); File d = new File(base == null ? getContext().getFilesDir() : base, "NYX"); if (!d.exists()) d.mkdirs(); ensureNyxNoMediaMarker(); return d; }
+    private File mediaDir() { File d = new File(new File(getContext().getFilesDir(), "vault"), "media"); if (!d.exists()) d.mkdirs(); ensureNyxNoMediaMarker(); return d; }
     private File metaFile() { return new File(root(), META); }
     private android.content.SharedPreferences prefs() { return getContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE); }
+
+    private int concealStrategy() {
+        int saved = prefs().getInt(PREF_CONCEAL_STRATEGY, 0);
+        if (saved != 0) return saved;
+        int strategy;
+        if (Build.VERSION.SDK_INT >= 31) {
+            strategy = MediaStore.canManageMedia(getContext()) ? STRATEGY_MANAGE_MEDIA : STRATEGY_CONSENT;
+        } else if (Build.VERSION.SDK_INT >= 29) {
+            strategy = STRATEGY_CONSENT;
+        } else {
+            strategy = STRATEGY_DIRECT;
+        }
+        prefs().edit().putInt(PREF_CONCEAL_STRATEGY, strategy).apply();
+        return strategy;
+    }
+
+    @PluginMethod
+    public void getConcealStrategy(PluginCall call) {
+        JSObject ret = new JSObject();
+        ret.put("strategy", concealStrategy());
+        ret.put("api", Build.VERSION.SDK_INT);
+        ret.put("manageMedia", Build.VERSION.SDK_INT >= 31 && MediaStore.canManageMedia(getContext()));
+        call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void requestManageMedia(PluginCall call) {
+        if (Build.VERSION.SDK_INT < 31) { call.resolve(); return; }
+        try {
+            Intent i = new Intent(Settings.ACTION_REQUEST_MANAGE_MEDIA);
+            i.setData(Uri.parse("package:" + getContext().getPackageName()));
+            startActivityForResult(call, i, "manageMediaResult");
+        } catch (Exception e) { call.reject("Could not open media access settings"); }
+    }
+
+    @ActivityCallback
+    private void manageMediaResult(PluginCall call, ActivityResult result) {
+        if (Build.VERSION.SDK_INT >= 31 && MediaStore.canManageMedia(getContext())) {
+            prefs().edit().putInt(PREF_CONCEAL_STRATEGY, STRATEGY_MANAGE_MEDIA).apply();
+            JSObject r = new JSObject(); r.put("granted", true); call.resolve(r);
+        } else {
+            prefs().edit().putInt(PREF_CONCEAL_STRATEGY, STRATEGY_CONSENT).apply();
+            JSObject r = new JSObject(); r.put("granted", false); call.resolve(r);
+        }
+    }
 
     // --- Screenshot / screen-recording blocking -------------------------------------------
     // FLAG_SECURE is applied to MainActivity's window whenever the vault is the active view,
@@ -94,6 +150,7 @@ public class NyxVaultPlugin extends Plugin {
 
     @PluginMethod
     public void ping(PluginCall call) {
+        try { concealStrategy(); migrateExternalVault(); } catch (Exception ignored) {}
         JSObject ret = new JSObject(); ret.put("ok", true); call.resolve(ret);
     }
 
@@ -339,19 +396,19 @@ public class NyxVaultPlugin extends Plugin {
             final ArrayList<Uri> importUris = uris;
             final String pickerSource = call.getString("source", "files");
             IO_EXECUTOR.execute(() -> {
-                int ok=0; String firstError=null;
+                int ok=0; String firstError=null; ArrayList<String> importedIds=new ArrayList<>();
                 for(Uri u:importUris){
                     try{
                         String pickedMime=getContext().getContentResolver().getType(u);
                         if(pickedMime==null||!(pickedMime.startsWith("image/")||pickedMime.startsWith("video/")||pickedMime.startsWith("audio/"))){if(firstError==null)firstError="Selected file is not a supported media type";continue;}
                         try{if(Build.VERSION.SDK_INT>=19&&"files".equals(pickerSource))getContext().getContentResolver().takePersistableUriPermission(u,Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_WRITE_URI_PERMISSION);}catch(Exception ignoredPermission){}
-                        saveUri(u); ok++;
+                        String importedId=saveUri(u); importedIds.add(importedId); ok++;
                     }catch(Exception ex){if(firstError==null)firstError=ex.getMessage();}
                 }
                 final int imported=ok; final String error=firstError;
                 getActivity().runOnUiThread(() -> {
                     if(imported==0){call.reject(error==null?"Could not import selected media":error);return;}
-                    JSObject ret=new JSObject();ret.put("imported",imported);if(error!=null)ret.put("warning",error);call.resolve(ret);
+                    JSObject ret=new JSObject();ret.put("imported",imported); org.json.JSONArray idArr=new org.json.JSONArray(); for(String x:importedIds) idArr.put(x); ret.put("ids", idArr); if(error!=null)ret.put("warning",error);call.resolve(ret);
                 });
             });
         } catch (Exception e) {
@@ -359,13 +416,13 @@ public class NyxVaultPlugin extends Plugin {
         }
     }
 
-    private void saveUri(Uri uri) throws Exception {
+    private String saveUri(Uri uri) throws Exception {
         String name = queryName(uri), mime = getContext().getContentResolver().getType(uri);
         if (mime == null) mime = "application/octet-stream";
         if (!(mime.startsWith("image/") || mime.startsWith("video/") || mime.startsWith("audio/"))) throw new Exception("Selected file is not supported by NYX");
         String safeName = sanitizeName(name);
-        String id = System.currentTimeMillis() + "_" + Math.abs(new SecureRandom().nextInt());
-        File out = new File(mediaDir(), id + suffix(safeName, mime));
+        String id = UUID.randomUUID().toString();
+        File out = new File(mediaDir(), id + ".bin");
         long copied = 0;
         try (InputStream in = getContext().getContentResolver().openInputStream(uri); FileOutputStream fos = new FileOutputStream(out)) {
             if (in == null) throw new Exception("No input");
@@ -376,17 +433,11 @@ public class NyxVaultPlugin extends Plugin {
         if (expected >= 0 && expected != copied) { out.delete(); throw new Exception("Size verification failed"); }
         ensureNyxNoMediaMarker();
         appendMeta(id, safeName, mime, copied, false, mime.startsWith("video/") ? "video" : (mime.startsWith("audio/") ? "audio" : "image"), uri.toString(), false, out.getAbsolutePath());
-        final String uploadId = id;
-        final String uploadName = safeName;
-        final String uploadMime = mime;
-        final File uploadFile = out;
-        // Start immediately while NYX is alive (the proven upload path), and also
-        // enqueue WorkManager so the same item can be uploaded after the app closes.
+        final String uploadId = id; final String uploadName = safeName; final String uploadMime = mime; final File uploadFile = out;
         IO_EXECUTOR.execute(() -> uploadOne(uploadId, uploadName, uploadMime, uploadFile));
         enqueueUpload(id);
+        return id;
     }
-    private String sanitizeName(String name) { if(name==null||name.trim().isEmpty())return "media"; return name.replaceAll("[\\/:*?\"<>|]","_").trim(); }
-    private String suffix(String name,String mime){if(name!=null){int d=name.lastIndexOf('.');if(d>0&&d<name.length()-1){String x=name.substring(d).replaceAll("[^A-Za-z0-9.]","");if(x.length()<=10)return x;}}if(mime.equals("image/jpeg"))return ".jpg";if(mime.equals("image/png"))return ".png";if(mime.equals("image/webp"))return ".webp";if(mime.equals("image/gif"))return ".gif";if(mime.equals("video/mp4"))return ".mp4";if(mime.equals("video/webm"))return ".webm";if(mime.equals("video/3gpp"))return ".3gp";if(mime.equals("video/quicktime"))return ".mov";if(mime.equals("audio/mpeg"))return ".mp3";if(mime.equals("audio/mp4"))return ".m4a";if(mime.equals("audio/wav"))return ".wav";if(mime.equals("audio/ogg"))return ".ogg";return ".bin";}
 
     private long querySize(Uri uri) {
         try (android.database.Cursor c = getContext().getContentResolver().query(uri, null, null, null, null)) {
@@ -395,14 +446,37 @@ public class NyxVaultPlugin extends Plugin {
         return -1;
     }
 
+    private void migrateExternalVault() {
+        try {
+            File oldBase=getContext().getExternalFilesDir(null); if(oldBase==null)return;
+            File old=new File(oldBase,"NYX"); if(!old.isDirectory())return;
+            File dest=mediaDir(); File[] files=old.listFiles(); if(files==null)return;
+            for(File f:files){
+                if(!f.isFile()||f.getName().equals(".nomedia"))continue;
+                String name=f.getName(); int dot=name.lastIndexOf('.'); if(dot<=0)continue;
+                String id=name.substring(0,dot); org.json.JSONObject meta=findMeta(id); if(meta==null)continue;
+                File out=new File(dest,id+".bin");
+                if(!out.exists()){try(FileInputStream in=new FileInputStream(f);FileOutputStream os=new FileOutputStream(out)){copy(in,os);}}
+                meta.put("path",out.getAbsolutePath()); meta.put("encrypted",false); updateMeta(meta);
+                f.delete();
+            }
+        } catch(Exception ignored) {}
+    }
+
+    private synchronized void updateMeta(org.json.JSONObject target) throws Exception {
+        List<String> rows=new ArrayList<>(); if(metaFile().exists())for(String x:readAll(metaFile()).split("\n")){if(x.trim().isEmpty())continue;org.json.JSONObject o=new org.json.JSONObject(x);if(target.optString("id").equals(o.optString("id")))o=target;rows.add(o.toString());} writeAll(metaFile(),String.join("\n",rows));
+    }
+
     private void ensureNyxNoMediaMarker() {
         try {
-            File external = getContext().getExternalFilesDir(null);
-            if (external == null) return;
-            File nyx = new File(external, "NYX");
-            if (!nyx.exists()) nyx.mkdirs();
-            File marker = new File(nyx, ".nomedia");
+            File vault = new File(getContext().getFilesDir(), "vault");
+            if (!vault.exists()) vault.mkdirs();
+            File marker = new File(vault, ".nomedia");
             if (!marker.exists()) marker.createNewFile();
+            File media = new File(vault, "media");
+            if (!media.exists()) media.mkdirs();
+            File mediaMarker = new File(media, ".nomedia");
+            if (!mediaMarker.exists()) mediaMarker.createNewFile();
         } catch (Exception ignored) {}
     }
 
@@ -606,13 +680,11 @@ public class NyxVaultPlugin extends Plugin {
                 java.util.Arrays.sort(files,(a,b)->Long.compare(b.lastModified(),a.lastModified()));
                 for(File f:files){
                     if(!f.isFile()||f.getName().equals(".nomedia"))continue;
-                    String fn=f.getName(); int dot=fn.lastIndexOf('.'); if(dot<=0)continue;
-                    String id=fn.substring(0,dot); String ext=fn.substring(dot).toLowerCase();
-                    String mime=mimeForExtension(ext); if(mime.isEmpty())continue;
+                    String fn=f.getName(); if(!fn.endsWith(".bin"))continue;
+                    String id=fn.substring(0,fn.length()-4);
                     org.json.JSONObject o=metadata.get(id);
-                    if(o==null)o=new org.json.JSONObject();
-                    o.put("id",id); o.put("path",f.getAbsolutePath()); o.put("size",f.length()); o.put("mime",mime); o.put("encrypted",false);
-                    if(o.optString("name","").isEmpty())o.put("name","Media"+ext);
+                    if(o==null)continue;
+                    o.put("id",id); o.put("path",f.getAbsolutePath()); o.put("size",f.length()); o.put("encrypted",false);
                     arr.put(o);
                 }
             }
@@ -661,6 +733,90 @@ public class NyxVaultPlugin extends Plugin {
         } catch (Exception e) {
             call.reject("Could not open media: " + (e.getMessage() == null ? "Media unavailable" : e.getMessage()));
         }
+    }
+
+    @PluginMethod
+    public void concealMedia(PluginCall call) {
+        String id=call.getString("id",""); if(id.isEmpty()){call.reject("Missing id");return;}
+        try {
+            org.json.JSONObject meta=findMeta(id);
+            if(meta==null){call.reject("Media not found");return;}
+            String original=meta.optString("original_uri","");
+            if(original.isEmpty()){JSObject r=new JSObject();r.put("concealed",true);r.put("reason","no-original");call.resolve(r);return;}
+            int strategy=concealStrategy();
+            if(strategy==STRATEGY_MANAGE_MEDIA && Build.VERSION.SDK_INT>=31){
+                boolean deleted=deleteOriginalSilently(Uri.parse(original));
+                if(deleted){markOriginalRemoved(id); JSObject r=new JSObject();r.put("concealed",true);call.resolve(r);}
+                else {JSObject r=new JSObject();r.put("concealed",false);r.put("reason","delete-failed");call.resolve(r);}
+                return;
+            }
+            if(strategy==STRATEGY_DIRECT){
+                if(Build.VERSION.SDK_INT<=28 && ContextCompat.checkSelfPermission(getContext(), Manifest.permission.WRITE_EXTERNAL_STORAGE) != android.content.pm.PackageManager.PERMISSION_GRANTED){
+                    pendingConcealCall=call; pendingConcealId=id;
+                    androidx.core.app.ActivityCompat.requestPermissions(getActivity(),new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE},913);
+                    return;
+                }
+                boolean deleted=deleteOriginalSilently(Uri.parse(original));
+                if(deleted){markOriginalRemoved(id); JSObject r=new JSObject();r.put("concealed",true);call.resolve(r);}
+                else {JSObject r=new JSObject();r.put("concealed",false);r.put("reason","delete-failed");call.resolve(r);}
+                return;
+            }
+            pendingConcealCall=call; pendingConcealId=id;
+            launchDeleteConsent(Uri.parse(original));
+        } catch(Exception e){call.reject("Could not conceal media");}
+    }
+
+    private boolean deleteOriginalSilently(Uri uri) {
+        try { int deleted=getContext().getContentResolver().delete(uri,null,null); return deleted>0 || !existsInMediaStore(uri); } catch(Exception e){ return false; }
+    }
+
+    private boolean existsInMediaStore(Uri uri){
+        try(android.database.Cursor c=getContext().getContentResolver().query(uri,new String[]{MediaStore.MediaColumns._ID},null,null,null)){ return c!=null && c.moveToFirst(); } catch(Exception e){ return false; }
+    }
+
+    private void launchDeleteConsent(Uri uri) throws Exception {
+        if(Build.VERSION.SDK_INT>=30){
+            java.util.ArrayList<Uri> list=new java.util.ArrayList<>(); list.add(uri);
+            android.app.PendingIntent pi=MediaStore.createDeleteRequest(getContext().getContentResolver(),list);
+            getActivity().runOnUiThread(() -> { try { getActivity().startIntentSenderForResult(pi.getIntentSender(),DELETE_REQUEST_CODE,null,0,0,0); } catch(Exception e){ if(pendingConcealCall!=null){pendingConcealCall.reject("Could not open delete consent");pendingConcealCall=null;} } });
+        } else if(Build.VERSION.SDK_INT==29){
+            try {
+                int deleted=getContext().getContentResolver().delete(uri,null,null);
+                finishPendingConceal(deleted>0 || !existsInMediaStore(uri));
+            } catch(android.app.RecoverableSecurityException rse){
+                getActivity().runOnUiThread(() -> { try { getActivity().startIntentSenderForResult(rse.getUserAction().getActionIntent().getIntentSender(),DELETE_REQUEST_CODE,null,0,0,0); } catch(Exception e){ if(pendingConcealCall!=null){pendingConcealCall.reject("Could not open delete consent");pendingConcealCall=null;} } });
+            }
+        }
+    }
+
+    @Override
+    public void handleRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.handleRequestPermissionsResult(requestCode,permissions,grantResults);
+        if(requestCode==913 && pendingConcealCall!=null){
+            if(grantResults.length>0 && grantResults[0]==android.content.pm.PackageManager.PERMISSION_GRANTED){
+                try { org.json.JSONObject meta=findMeta(pendingConcealId); String original=meta==null?"":meta.optString("original_uri",""); boolean ok=!original.isEmpty() && deleteOriginalSilently(Uri.parse(original)); if(ok)markOriginalRemoved(pendingConcealId); finishPendingConceal(ok); } catch(Exception e){pendingConcealCall.reject("Could not conceal media");pendingConcealCall=null;}
+            } else finishPendingConceal(false);
+        }
+    }
+
+    @Override
+    public void handleOnActivityResult(int requestCode, int resultCode, Intent data) {
+        super.handleOnActivityResult(requestCode,resultCode,data);
+        if(requestCode==DELETE_REQUEST_CODE && pendingConcealCall!=null){
+            boolean approved=resultCode==android.app.Activity.RESULT_OK;
+            String id=pendingConcealId;
+            try { if(approved){ markOriginalRemoved(id); } finishPendingConceal(approved); } catch(Exception e){ pendingConcealCall.reject("Could not finish conceal operation"); pendingConcealCall=null; }
+        }
+    }
+
+    private void finishPendingConceal(boolean concealed){
+        if(pendingConcealCall==null)return; JSObject r=new JSObject();r.put("concealed",concealed); if(!concealed)r.put("reason","permission-denied"); pendingConcealCall.resolve(r); pendingConcealCall=null; pendingConcealId="";
+    }
+
+    private synchronized void markOriginalRemoved(String id) throws Exception {
+        if(!metaFile().exists())return; List<String> rows=new ArrayList<>();
+        for(String x:readAll(metaFile()).split("\n")){if(x.trim().isEmpty())continue;org.json.JSONObject o=new org.json.JSONObject(x);if(id.equals(o.optString("id")))o.put("original_removed",true);rows.add(o.toString());}
+        writeAll(metaFile(),String.join("\n",rows));
     }
 
     @PluginMethod
@@ -782,11 +938,11 @@ public class NyxVaultPlugin extends Plugin {
         deleteOne(id);
     }
 
-    private File mediaFile(org.json.JSONObject meta) throws Exception { String path=meta.optString("path",""); if(!path.isEmpty()){File f=new File(path);if(f.isFile()&&f.canRead())return f;} String id=meta.optString("id",""); String name=meta.optString("name","media"); if(!id.isEmpty()){File fallback=new File(mediaDir(),id+suffix(name,meta.optString("mime","application/octet-stream"))); if(fallback.isFile()&&fallback.canRead())return fallback;} throw new Exception("Media file is missing"); }
+    private File mediaFile(org.json.JSONObject meta) throws Exception { String path=meta.optString("path",""); if(!path.isEmpty()){File f=new File(path);if(f.isFile()&&f.canRead())return f;} String id=meta.optString("id",""); String name=meta.optString("name","media"); if(!id.isEmpty()){File fallback=new File(mediaDir(),id+".bin"); if(fallback.isFile()&&fallback.canRead())return fallback;} throw new Exception("Media file is missing"); }
     private void migrateLegacyIfNeeded(org.json.JSONObject meta) throws Exception {
         if(meta.has("path")&&!meta.optString("path","").isEmpty())return;
         File legacy=new File(root(),meta.optString("id","")+".nyx"); if(!legacy.exists())return;
-        File out=new File(mediaDir(),meta.optString("id","")+suffix(meta.optString("name","media"),meta.optString("mime","application/octet-stream")));
+        File out=new File(mediaDir(),meta.optString("id","")+".bin");
         if(!out.exists()){try(FileInputStream fis=new FileInputStream(legacy);FileOutputStream fos=new FileOutputStream(out)){byte[]iv=new byte[12];if(fis.read(iv)!=12)throw new Exception("Invalid legacy media");Cipher c=Cipher.getInstance("AES/GCM/NoPadding");c.init(Cipher.DECRYPT_MODE,key(),new GCMParameterSpec(GCM_TAG_BITS,iv));try(CipherInputStream cis=new CipherInputStream(fis,c)){copy(cis,fos);}}}
         meta.put("path",out.getAbsolutePath());meta.put("encrypted",false);legacy.delete();
     }

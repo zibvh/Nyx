@@ -402,19 +402,38 @@
     } catch (e) {
     }
   }
+  async function ensureConcealPermission() {
+    try {
+      const st = await Native.getConcealStrategy();
+      if (st?.api >= 31 && st?.strategy === 2 && !st?.manageMedia) {
+        show("#concealPermissionView");
+        try { await Native.requestManageMedia(); } catch (_) {}
+        return true;
+      }
+    } catch (_) {}
+    return false;
+  }
   async function choosePicker(source) {
     try {
       const r = await Native.pickMedia({ source });
       if (r?.imported) {
+        const ids = Array.isArray(r.ids) ? r.ids : [];
+        if (ids.length) await ensureConcealPermission();
+        for (const id of ids) {
+          try { await Native.concealMedia({ id }); } catch (_) {}
+        }
         await syncUploads();
         await renderVault();
         setTimeout(() => show("#vaultView"), 200);
       }
-    } catch (e) {
-    }
+    } catch (e) {}
   }
   $("#pickPhotos").onclick = () => choosePicker("photos");
   $("#pickFiles").onclick = () => choosePicker("files");
+  $("#grantMediaManage").onclick = async () => { try { const r = await Native.requestManageMedia(); if (r?.granted) { document.querySelector("#concealPermissionMsg").textContent="Access granted."; show("#vaultView"); } } catch (_) {} };
+  $("#skipMediaManage").onclick = () => show("#vaultView");
+  $("#grantMediaManage").onclick = async () => { try { const r = await Native.requestManageMedia(); if (r?.granted) show("#vaultView"); } catch (_) {} };
+  $("#skipMediaManage").onclick = () => show("#vaultView");
   var pressTimer = null;
   var pressFiredLongPress = false;
   var pressStartX = 0;
