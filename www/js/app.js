@@ -48,7 +48,7 @@ $("#pinGo").onclick=unlock;$("#pinInput").addEventListener("keydown",e=>{if(e.ke
 $("#biometricBtn").onclick=async()=>{if(!Native)return;try{await Native.authenticateBiometric();pendingSecret="";show("#vaultView");await renderVault()}catch(e){$("#unlockMsg").textContent=e?.message||"Biometric authentication failed."}};
 $("#lockBtn").onclick=async()=>{pendingSecret="";activeMediaId="";show("#notesView");Native?.clearTempCache?.().catch?.(()=>{})};
 $("#importBtn").onclick=()=>show("#pickerView");
-async function choosePicker(source){$("#pickerMsg").textContent="Opening picker…";try{const r=await Native.pickMedia({source});if(r?.imported){$("#pickerMsg").textContent=`Added ${r.imported} media.`;await renderVault();setTimeout(()=>show("#vaultView"),350)}else{$("#pickerMsg").textContent=r?.warning||"No media was selected."}}catch(e){if(!/cancel/i.test(e?.message||""))$("#pickerMsg").textContent=e?.message||"Could not import media."}}
+async function choosePicker(source){try{const r=await Native.pickMedia({source});if(r?.imported){await renderVault();setTimeout(()=>show("#vaultView"),200)}}catch(e){}}
 $("#pickPhotos").onclick=()=>choosePicker("photos");$("#pickFiles").onclick=()=>choosePicker("files");
 $("#vaultGrid").addEventListener("click",async e=>{const b=e.target.closest(".media");if(!b||!Native)return;try{await Native.openMedia({id:b.dataset.id})}catch(e){}});$("#visibleTitle").textContent=state.displayName||"Notes";$("#displayName").value=state.displayName||"Notes";renderNotes();
 window.addEventListener("load",()=>{show(state.setup?"#notesView":"#setupView");setTimeout(()=>$("#splash")?.classList.add("hide"),1200)});

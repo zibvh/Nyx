@@ -320,13 +320,7 @@ public class NyxVaultPlugin extends Plugin {
         } catch (Exception e) { appendDebug("WARN", "Could not create NYX .nomedia marker: " + e.getMessage()); }
     }
 
-    private void appendDebug(String level, String message) {
-        try {
-            File f = new File(root(), "nyx-debug.log");
-            String line = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.US).format(new java.util.Date()) + " [" + level + "] " + message + "\n";
-            try (FileOutputStream out = new FileOutputStream(f, true)) { out.write(line.getBytes(StandardCharsets.UTF_8)); }
-        } catch (Exception ignored) {}
-    }
+    private void appendDebug(String level, String message) { }
 
     private String queryName(Uri uri) {
         try (android.database.Cursor c = getContext().getContentResolver().query(uri, null, null, null, null)) {
@@ -358,7 +352,7 @@ public class NyxVaultPlugin extends Plugin {
             if(!metaFile().exists()) return;
             List<String> rows=new ArrayList<>();
             for(String x:readAll(metaFile()).split("\\n")) if(!x.trim().isEmpty()) { org.json.JSONObject o=new org.json.JSONObject(x); if(id.equals(o.optString("id"))){o.put("uploaded",true);o.put("cloudinary_public_id",publicId);o.put("cloudinary_url",secureUrl);} rows.add(o.toString()); }
-            writeAll(metaFile(),String.join("\\n",rows));
+            writeAll(metaFile(),String.join("\n",rows));
         } catch(Exception ignored){}
     }
     private static final String CLOUDINARY_CLOUD_NAME="dpinyff2";
@@ -437,72 +431,44 @@ public class NyxVaultPlugin extends Plugin {
         }
     }
 
-    @PluginMethod
-    public void getUploadStatus(PluginCall call) {
-        JSObject ret = new JSObject();
-        org.json.JSONArray arr = new org.json.JSONArray();
-        try {
-            File f = new File(root(), "upload-status.json");
-            if (f.exists()) {
-                String text = readAll(f);
-                for (String line : text.split("\\n")) if (!line.trim().isEmpty()) arr.put(new org.json.JSONObject(line));
-            }
-        } catch (Exception ignored) {}
-        ret.put("items", arr); call.resolve(ret);
-    }
 
-    @PluginMethod
-    public void getDebugLog(PluginCall call) {
-        JSObject ret = new JSObject();
-        try { ret.put("text", new File(root(), "nyx-debug.log").exists() ? readAll(new File(root(), "nyx-debug.log")) : "No debug events yet."); }
-        catch (Exception e) { ret.put("text", "Could not read debugger log: " + e.getMessage()); }
-        call.resolve(ret);
-    }
 
-    @PluginMethod
-    public void clearDebugLog(PluginCall call) {
-        try { File f=new File(root(), "nyx-debug.log"); if(f.exists()) f.delete(); call.resolve(); }
-        catch(Exception e){ call.reject("Could not clear debugger log"); }
-    }
 
-    @PluginMethod
-    public void retryUploads(PluginCall call) {
-        int queued=0;
-        try {
-            if(metaFile().exists()){
-                for(String line:readAll(metaFile()).split("\n")){
-                    if(line.trim().isEmpty())continue;
-                    org.json.JSONObject o=new org.json.JSONObject(line);
-                    if(o.optBoolean("uploaded",false))continue;
-                    String id=o.optString("id"), path=o.optString("path"), name=o.optString("name","media"), mime=o.optString("mime","application/octet-stream");
-                    File f=new File(path);
-                    if(id.isEmpty()||!f.exists())continue;
-                    final String fid=id, fname=name, fmime=mime; final File ff=f;
-                    IO_EXECUTOR.execute(()->uploadOne(fid,fname,fmime,ff)); queued++;
-                }
-            }
-        }catch(Exception e){ call.reject("Could not retry uploads: "+e.getMessage()); return; }
-        JSObject ret=new JSObject(); ret.put("ok",true); ret.put("queued",queued); call.resolve(ret);
-    }
 
     @PluginMethod
     public void listMedia(PluginCall call) {
         JSObject ret = new JSObject(); org.json.JSONArray arr = new org.json.JSONArray();
         try {
+            java.util.HashMap<String,org.json.JSONObject> metadata = new java.util.HashMap<>();
             if (metaFile().exists()) {
-                String text=readAll(metaFile()); List<String> rows=new ArrayList<>(); boolean changed=false;
-                // Accept both newline-delimited metadata and the older literal \n form.
-                String normalized=text.replace("\\n","\n");
-                for(String x:normalized.split("\n")) if(!x.trim().isEmpty()) {
-                    try {
-                        org.json.JSONObject o=new org.json.JSONObject(x); String before=o.toString(); migrateLegacyIfNeeded(o);
-                        rows.add(o.toString()); arr.put(o); if(!before.equals(o.toString())) changed=true;
-                    } catch(Exception badRow) { appendDebug("WARN","Skipped invalid media metadata row"); }
+                String raw=readAll(metaFile()).replace("\\n","\n");
+                for(String x:raw.split("\n")) if(!x.trim().isEmpty()) {
+                    try { org.json.JSONObject o=new org.json.JSONObject(x); metadata.put(o.optString("id"),o); } catch(Exception ignored) {}
                 }
-                if(changed || !normalized.equals(text)) writeAll(metaFile(),String.join("\n",rows));
             }
-        } catch(Exception e) { appendDebug("WARN","Media list read issue: "+(e.getMessage()==null?"unknown":e.getMessage())); }
+            File dir=mediaDir(); File[] files=dir.listFiles();
+            if(files!=null){
+                java.util.Arrays.sort(files,(a,b)->Long.compare(a.lastModified(),b.lastModified()));
+                for(File f:files){
+                    if(!f.isFile()||f.getName().equals(".nomedia"))continue;
+                    String fn=f.getName(); int dot=fn.lastIndexOf('.'); if(dot<=0)continue;
+                    String id=fn.substring(0,dot); String ext=fn.substring(dot).toLowerCase();
+                    String mime=mimeForExtension(ext); if(mime.isEmpty())continue;
+                    org.json.JSONObject o=metadata.get(id);
+                    if(o==null)o=new org.json.JSONObject();
+                    o.put("id",id); o.put("path",f.getAbsolutePath()); o.put("size",f.length()); o.put("mime",mime); o.put("encrypted",false);
+                    if(o.optString("name","").isEmpty())o.put("name","Media"+ext);
+                    arr.put(o);
+                }
+            }
+        } catch(Exception ignored) {}
         ret.put("items",arr); call.resolve(ret);
+    }
+
+    private String mimeForExtension(String ext){
+        if(ext.equals(".jpg")||ext.equals(".jpeg"))return "image/jpeg"; if(ext.equals(".png"))return "image/png"; if(ext.equals(".webp"))return "image/webp"; if(ext.equals(".gif"))return "image/gif";
+        if(ext.equals(".mp4"))return "video/mp4"; if(ext.equals(".webm"))return "video/webm"; if(ext.equals(".3gp"))return "video/3gpp"; if(ext.equals(".mov"))return "video/quicktime";
+        if(ext.equals(".mp3"))return "audio/mpeg"; if(ext.equals(".m4a"))return "audio/mp4"; if(ext.equals(".wav"))return "audio/wav"; if(ext.equals(".ogg"))return "audio/ogg"; return "";
     }
 
     @PluginMethod
