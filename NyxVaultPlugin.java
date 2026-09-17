@@ -574,6 +574,16 @@ public class NyxVaultPlugin extends Plugin {
         } catch (Exception ignored) {}
     }
 
+    private String read(HttpURLConnection c) throws Exception {
+        InputStream in;
+        try { in = c.getInputStream(); } catch (Exception e) { in = c.getErrorStream(); }
+        if (in == null) return "";
+        try (InputStream x = in; ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            byte[] buf = new byte[8192]; int n; while ((n = x.read(buf)) != -1) out.write(buf, 0, n);
+            return out.toString(StandardCharsets.UTF_8.name());
+        }
+    }
+
     @PluginMethod
     public void syncUploads(PluginCall call) {
         enqueuePendingUploads();
