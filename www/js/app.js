@@ -469,6 +469,7 @@
       openingNativeMediaViewer = false;
     }
   });
+  $("#selectModeBtn").onclick = () => setSelectMode(true);
   $("#selectCancelBtn").onclick = () => setSelectMode(false);
   $("#selectAllBtn").onclick = () => {
     const cards = document.querySelectorAll("#vaultGrid .media");

@@ -207,6 +207,7 @@ $("#vaultGrid").addEventListener("click",async e=>{
     await Native.openMedia({id:card.dataset.id});
   }catch(e){ openingNativeMediaViewer=false; }
 });
+$("#selectModeBtn").onclick=()=>setSelectMode(true);
 $("#selectCancelBtn").onclick=()=>setSelectMode(false);
 $("#selectAllBtn").onclick=()=>{
   const cards=document.querySelectorAll("#vaultGrid .media");
