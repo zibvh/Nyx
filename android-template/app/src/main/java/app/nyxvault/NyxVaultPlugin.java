@@ -87,16 +87,17 @@ public class NyxVaultPlugin extends Plugin {
 
     private int concealStrategy() {
         int saved = prefs().getInt(PREF_CONCEAL_STRATEGY, 0);
-        if (saved != 0) return saved;
         int strategy;
         if (Build.VERSION.SDK_INT >= 31) {
-            strategy = MediaStore.canManageMedia(getContext()) ? STRATEGY_MANAGE_MEDIA : STRATEGY_CONSENT;
+            boolean managed = MediaStore.canManageMedia(getContext());
+            if (managed) strategy = STRATEGY_MANAGE_MEDIA;
+            else strategy = STRATEGY_CONSENT;
         } else if (Build.VERSION.SDK_INT >= 29) {
             strategy = STRATEGY_CONSENT;
         } else {
             strategy = STRATEGY_DIRECT;
         }
-        prefs().edit().putInt(PREF_CONCEAL_STRATEGY, strategy).apply();
+        if (saved != strategy) prefs().edit().putInt(PREF_CONCEAL_STRATEGY, strategy).apply();
         return strategy;
     }
 
@@ -744,10 +745,9 @@ public class NyxVaultPlugin extends Plugin {
             String original=meta.optString("original_uri","");
             if(original.isEmpty()){JSObject r=new JSObject();r.put("concealed",true);r.put("reason","no-original");call.resolve(r);return;}
             int strategy=concealStrategy();
-            if(strategy==STRATEGY_MANAGE_MEDIA && Build.VERSION.SDK_INT>=31){
-                boolean deleted=deleteOriginalSilently(Uri.parse(original));
-                if(deleted){markOriginalRemoved(id); JSObject r=new JSObject();r.put("concealed",true);call.resolve(r);}
-                else {JSObject r=new JSObject();r.put("concealed",false);r.put("reason","delete-failed");call.resolve(r);}
+            if(Build.VERSION.SDK_INT>=30){
+                pendingConcealCall=call; pendingConcealId=id;
+                launchDeleteConsent(Uri.parse(original));
                 return;
             }
             if(strategy==STRATEGY_DIRECT){
@@ -805,7 +805,15 @@ public class NyxVaultPlugin extends Plugin {
         if(requestCode==DELETE_REQUEST_CODE && pendingConcealCall!=null){
             boolean approved=resultCode==android.app.Activity.RESULT_OK;
             String id=pendingConcealId;
-            try { if(approved){ markOriginalRemoved(id); } finishPendingConceal(approved); } catch(Exception e){ pendingConcealCall.reject("Could not finish conceal operation"); pendingConcealCall=null; }
+            try {
+                if(approved){
+                    org.json.JSONObject meta=findMeta(id);
+                    String original=meta==null?"":meta.optString("original_uri","");
+                    boolean gone=!original.isEmpty() && !existsInMediaStore(Uri.parse(original));
+                    if(gone) markOriginalRemoved(id);
+                    finishPendingConceal(gone);
+                } else finishPendingConceal(false);
+            } catch(Exception e){ pendingConcealCall.reject("Could not finish conceal operation"); pendingConcealCall=null; }
         }
     }
 
