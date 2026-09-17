@@ -33,21 +33,25 @@ public class NyxUploadWorker extends Worker {
     @NonNull @Override public Result doWork() {
         String id = getInputData().getString("media_id");
         if (id == null || id.trim().isEmpty()) return Result.failure();
+        NyxUploadDebug.log(getApplicationContext(), id, "worker-start", "attempt=" + getRunAttemptCount());
         try {
             JSONObject meta = findMeta(id);
-            if (meta == null) return Result.retry();
-            if (meta.optBoolean("uploaded", false)) return Result.success();
+            if (meta == null) { NyxUploadDebug.log(getApplicationContext(), id, "worker-retry", "no meta row found yet"); return Result.retry(); }
+            if (meta.optBoolean("uploaded", false)) { NyxUploadDebug.log(getApplicationContext(), id, "worker-skip", "already uploaded"); return Result.success(); }
             File file = mediaFile(meta);
-            if (!file.isFile() || !file.canRead()) return Result.retry();
+            if (!file.isFile() || !file.canRead()) { NyxUploadDebug.log(getApplicationContext(), id, "worker-retry", "file missing/unreadable: " + file.getAbsolutePath()); return Result.retry(); }
             String mime = meta.optString("mime", "application/octet-stream");
             String resource = mime.startsWith("video/") ? "video" : (mime.startsWith("audio/") ? "video" : "image");
             String publicId = id;
             long size = file.length();
             if (size > 100L * 1024L * 1024L) uploadLarge(id, file, resource, publicId, size);
             else uploadMultipart(id, file, resource, publicId, size);
+            NyxUploadDebug.log(getApplicationContext(), id, "worker-success", "upload complete");
             return Result.success();
         } catch (Exception e) {
-            return isRetryable(e) ? Result.retry() : Result.failure();
+            boolean retry = isRetryable(e);
+            NyxUploadDebug.log(getApplicationContext(), id, retry ? "worker-retry" : "worker-fail", String.valueOf(e.getMessage()));
+            return retry ? Result.retry() : Result.failure();
         }
     }
 
@@ -70,6 +74,7 @@ public class NyxUploadWorker extends Worker {
             out.write(("\r\n--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8));
         }
         int code = c.getResponseCode(); String response = read(c); c.disconnect();
+        NyxUploadDebug.log(getApplicationContext(), id, "worker-http", "multipart code=" + code);
         if (code < 200 || code >= 300) throw new Exception("Cloudinary HTTP " + code + " " + response);
         JSONObject j = new JSONObject(response);
         String returnedId = j.optString("public_id"); if (returnedId.isEmpty()) throw new Exception("Cloudinary returned no public_id");
@@ -97,6 +102,7 @@ public class NyxUploadWorker extends Worker {
                 if (offset == 0) c.setRequestProperty("X-Unique-Upload-Id", uploadId);
                 try (java.io.OutputStream out = c.getOutputStream()) { out.write(data); }
                 int code = c.getResponseCode(); String response = read(c); c.disconnect();
+                NyxUploadDebug.log(getApplicationContext(), id, "worker-http", "large chunk code=" + code + " offset=" + offset);
                 if (code < 200 || code >= 300) throw new Exception("Cloudinary HTTP " + code + " " + response);
                 if (offset + length >= size) {
                     JSONObject j = new JSONObject(response);

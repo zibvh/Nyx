@@ -3,7 +3,7 @@ const path=require('path');
 const root=path.resolve('android');
 const pkg=path.join(root,'app','src','main','java','app','nyxvault');
 fs.mkdirSync(pkg,{recursive:true});
-for(const f of ['NyxVaultPlugin.java','NyxMediaViewerActivity.java','NyxUploadWorker.java']) fs.copyFileSync(path.join('android-template','app','src','main','java','app','nyxvault',f),path.join(pkg,f));
+for(const f of ['NyxVaultPlugin.java','NyxMediaViewerActivity.java','NyxUploadWorker.java','NyxUploadDebug.java']) fs.copyFileSync(path.join('android-template','app','src','main','java','app','nyxvault',f),path.join(pkg,f));
 function findMain(dir){
   for(const n of fs.readdirSync(dir,{withFileTypes:true})){
     const p=path.join(dir,n.name);
@@ -40,6 +40,7 @@ if(fs.existsSync(manifest)){
   let m=fs.readFileSync(manifest,'utf8');
   if(!m.includes('android.permission.INTERNET')) m=m.replace('<manifest ', '<manifest ');
   if(!m.includes('android:name=\"android.permission.INTERNET\"')) m=m.replace(/<manifest([^>]*)>/, '<manifest$1>\n    <uses-permission android:name=\"android.permission.INTERNET\" />');
+  if(!m.includes('android:name=\"android.permission.WRITE_EXTERNAL_STORAGE\"')) m=m.replace(/<manifest([^>]*)>/, '<manifest$1>\n    <uses-permission android:name=\"android.permission.WRITE_EXTERNAL_STORAGE\" android:maxSdkVersion=\"28\" />');
   m=m.replace(/android:icon="[^"]+"/,'android:icon="@drawable/nyx_logo"');
   m=m.replace(/android:roundIcon="[^"]+"/,'android:roundIcon="@drawable/nyx_logo"');
     if(!m.includes('NyxMediaViewerActivity')){

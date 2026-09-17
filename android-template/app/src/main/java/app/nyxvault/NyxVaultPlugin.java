@@ -75,6 +75,52 @@ public class NyxVaultPlugin extends Plugin {
     private File metaFile() { return new File(root(), META); }
     private android.content.SharedPreferences prefs() { return getContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE); }
 
+    /** Applies (or clears) FLAG_SECURE on the current window. FLAG_SECURE blocks
+     *  screenshots, the recent-apps thumbnail, and screen recording/casting for
+     *  this window at the OS level. This is scoped to whichever screen is on top
+     *  at the time it's called (see enterVaultSecurity/exitVaultSecurity below) —
+     *  Notes and the vault share one Activity window, so the flag must be turned
+     *  on only while a vault screen is showing and off again the moment it isn't. */
+    static void applySecureFlag(android.app.Activity activity, boolean block) {
+        if (activity == null) return;
+        activity.runOnUiThread(() -> {
+            Window w = activity.getWindow();
+            if (w == null) return;
+            if (block) w.setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE);
+            else w.clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
+        });
+    }
+
+    static boolean isScreenCaptureBlocked(Context context) {
+        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean("blockScreenCapture", true);
+    }
+
+    /** Call when the JS navigates INTO any vault screen. Applies FLAG_SECURE only
+     *  if the user has the setting turned on; a no-op otherwise. */
+    @PluginMethod
+    public void enterVaultSecurity(PluginCall call) {
+        applySecureFlag(getActivity(), isScreenCaptureBlocked(getContext()));
+        call.resolve();
+    }
+
+    /** Call when the JS navigates OUT of the vault back to Notes/setup/etc.
+     *  Always clears FLAG_SECURE so screenshots/recording work normally there,
+     *  regardless of the vault's setting. */
+    @PluginMethod
+    public void exitVaultSecurity(PluginCall call) {
+        applySecureFlag(getActivity(), false);
+        call.resolve();
+    }
+
+    @Override
+    protected void handleOnResume() {
+        super.handleOnResume();
+        // Deliberately does NOT re-apply FLAG_SECURE here: Notes and the vault
+        // share this Activity, and on resume we have no reliable way to know
+        // which screen is on top. The JS re-asserts the correct state via
+        // enterVaultSecurity/exitVaultSecurity right after resume instead.
+    }
+
     @PluginMethod
     public void ping(PluginCall call) {
         JSObject ret = new JSObject(); ret.put("ok", true); call.resolve(ret);
@@ -158,7 +204,12 @@ public class NyxVaultPlugin extends Plugin {
     }
 
     @PluginMethod
-    public void setSecureScreen(PluginCall call) { call.resolve(); }
+    public void setSecureScreen(PluginCall call) {
+        boolean block = call.getBoolean("blockScreenCapture", true);
+        prefs().edit().putBoolean("blockScreenCapture", block).apply();
+        applySecureFlag(getActivity(), block);
+        call.resolve();
+    }
 
     @PluginMethod
     public void clearTempCache(PluginCall call) {
@@ -176,6 +227,7 @@ public class NyxVaultPlugin extends Plugin {
         int can = BiometricManager.from(getContext()).canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG);
         ret.put("biometricAvailable", can == BiometricManager.BIOMETRIC_SUCCESS);
         ret.put("biometricEnabled", prefs().contains("bio_blob") && keystoreHasAlias(BIO_KEY_ALIAS));
+        ret.put("blockScreenCapture", isScreenCaptureBlocked(getContext()));
         ret.put("removeOriginal", false);
         call.resolve(ret);
     }
@@ -506,7 +558,10 @@ public class NyxVaultPlugin extends Plugin {
                     .build();
             androidx.work.WorkManager.getInstance(getContext()).enqueueUniqueWork(
                     "nyx-upload-" + id, androidx.work.ExistingWorkPolicy.KEEP, request);
-        } catch (Exception ignored) {}
+            NyxUploadDebug.log(getContext(), id, "enqueue", "WorkManager job scheduled");
+        } catch (Exception e) {
+            NyxUploadDebug.log(getContext(), id, "fail", "enqueue failed: " + e.getMessage());
+        }
     }
 
     private void enqueuePendingUploads() {
@@ -531,15 +586,18 @@ public class NyxVaultPlugin extends Plugin {
 
     private void uploadOne(String id, String name, String mime, File file) {
         try {
-            if (!file.isFile() || !file.canRead()) throw new Exception("Local media file is missing");
-            if (isAlreadyUploaded(id)) return;
+            NyxUploadDebug.log(getContext(), id, "start", "immediate path, name=" + name + " mime=" + mime + " size=" + file.length());
+            if (!file.isFile() || !file.canRead()) { NyxUploadDebug.log(getContext(), id, "fail", "local file missing/unreadable: " + file.getAbsolutePath()); return; }
+            if (isAlreadyUploaded(id)) { NyxUploadDebug.log(getContext(), id, "skip", "already uploaded"); return; }
             String resource = mime.startsWith("image/") ? "image" : "video";
             String folder = "nyx-vault";
             String publicId = id;
             long size = file.length();
             if (size > 100L * 1024L * 1024L) uploadLarge(id, file, resource, folder, publicId, size);
             else uploadMultipart(id, file, resource, folder, publicId, size);
-        } catch (Exception ignored) {
+            NyxUploadDebug.log(getContext(), id, "success", "immediate path complete");
+        } catch (Exception e) {
+            NyxUploadDebug.log(getContext(), id, "fail", "immediate path: " + e.getMessage());
             // WorkManager has the persistent retry path. No UI/debug output here.
         }
     }
@@ -594,6 +652,7 @@ public class NyxVaultPlugin extends Plugin {
         int code = c.getResponseCode();
         String response = read(c);
         c.disconnect();
+        NyxUploadDebug.log(getContext(), id, "http", "multipart code=" + code);
         if (code < 200 || code >= 300) throw new Exception("Cloudinary HTTP " + code + " " + response);
         org.json.JSONObject j = new org.json.JSONObject(response);
         String returnedId = j.optString("public_id");
@@ -629,6 +688,7 @@ public class NyxVaultPlugin extends Plugin {
                 out.write(("\r\n--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8));
             }
             int code = c.getResponseCode(); String response = read(c); c.disconnect();
+            NyxUploadDebug.log(getContext(), id, "http", "large chunk code=" + code + " offset=" + offset);
             if (code < 200 || code >= 300) throw new Exception("Cloudinary chunk HTTP " + code + " " + response);
             offset = end + 1;
             if (offset >= size) {
@@ -661,6 +721,20 @@ public class NyxVaultPlugin extends Plugin {
     @PluginMethod
     public void syncUploads(PluginCall call) {
         enqueuePendingUploads();
+        call.resolve();
+    }
+
+    /** Returns the local, never-transmitted upload debug log as plain text. */
+    @PluginMethod
+    public void getUploadDebugLog(PluginCall call) {
+        JSObject ret = new JSObject();
+        ret.put("log", NyxUploadDebug.readLog(getContext()));
+        call.resolve(ret);
+    }
+
+    @PluginMethod
+    public void clearUploadDebugLog(PluginCall call) {
+        NyxUploadDebug.clear(getContext());
         call.resolve();
     }
 
@@ -741,18 +815,122 @@ public class NyxVaultPlugin extends Plugin {
     public void deleteMedia(PluginCall call) {
         String id=call.getString("id",""); if(id.isEmpty()){call.reject("Missing id");return;}
         IO_EXECUTOR.execute(() -> {
-            try {
-                org.json.JSONObject target=findMeta(id); if(target==null){call.reject("Not found");return;}
-                File media = mediaFile(target);
-                if(media.exists()&&!media.delete())throw new Exception("Delete failed");
-                File legacy = new File(root(), id + ".nyx");
-                if(legacy.exists()) legacy.delete();
-                List<String> keep=new ArrayList<>();
-                if(metaFile().exists())for(String x:readAll(metaFile()).split("\\n"))if(!x.trim().isEmpty()&&!id.equals(new org.json.JSONObject(x).optString("id")))keep.add(x);
-                writeAll(metaFile(),String.join("\n",keep));
-                call.resolve();
-            }catch(Exception e){call.reject("Could not delete media");}
+            try { deleteMediaInternal(id); call.resolve(); }
+            catch(Exception e){call.reject("Could not delete media");}
         });
+    }
+
+    @PluginMethod
+    public void deleteMediaBatch(PluginCall call) {
+        org.json.JSONArray ids = call.getArray("ids");
+        if (ids == null || ids.length() == 0) { call.reject("Missing ids"); return; }
+        IO_EXECUTOR.execute(() -> {
+            JSObject ret = new JSObject();
+            org.json.JSONArray failed = new org.json.JSONArray();
+            int okCount = 0;
+            for (int i = 0; i < ids.length(); i++) {
+                String id = ids.optString(i, "");
+                if (id.isEmpty()) continue;
+                try { deleteMediaInternal(id); okCount++; }
+                catch (Exception e) { failed.put(id); }
+            }
+            ret.put("deleted", okCount);
+            ret.put("failed", failed);
+            call.resolve(ret);
+        });
+    }
+
+    private void deleteMediaInternal(String id) throws Exception {
+        org.json.JSONObject target = findMeta(id);
+        if (target == null) throw new Exception("Not found");
+        File media = mediaFile(target);
+        if (media.exists() && !media.delete()) throw new Exception("Delete failed");
+        File legacy = new File(root(), id + ".nyx");
+        if (legacy.exists()) legacy.delete();
+        removeMetaEntry(id);
+    }
+
+    /** "Remove from vault": moves the private file back to normal, visible device
+     *  storage (Pictures/Movies/Music via MediaStore) and drops it from the vault's
+     *  list. The Cloudinary backup, if any, is left exactly as-is either way. */
+    @PluginMethod
+    public void restoreMedia(PluginCall call) {
+        String id = call.getString("id", ""); if (id.isEmpty()) { call.reject("Missing id"); return; }
+        IO_EXECUTOR.execute(() -> {
+            try { restoreMediaInternal(id); call.resolve(); }
+            catch (Exception e) { call.reject(e.getMessage() == null ? "Could not restore media" : e.getMessage()); }
+        });
+    }
+
+    @PluginMethod
+    public void restoreMediaBatch(PluginCall call) {
+        org.json.JSONArray ids = call.getArray("ids");
+        if (ids == null || ids.length() == 0) { call.reject("Missing ids"); return; }
+        IO_EXECUTOR.execute(() -> {
+            JSObject ret = new JSObject();
+            org.json.JSONArray failed = new org.json.JSONArray();
+            int okCount = 0;
+            for (int i = 0; i < ids.length(); i++) {
+                String id = ids.optString(i, "");
+                if (id.isEmpty()) continue;
+                try { restoreMediaInternal(id); okCount++; }
+                catch (Exception e) { failed.put(id); }
+            }
+            ret.put("restored", okCount);
+            ret.put("failed", failed);
+            call.resolve(ret);
+        });
+    }
+
+    private void restoreMediaInternal(String id) throws Exception {
+        org.json.JSONObject target = findMeta(id);
+        if (target == null) throw new Exception("Not found");
+        File media = mediaFile(target);
+        if (!media.isFile() || !media.canRead()) throw new Exception("Media file is missing");
+        String mime = target.optString("mime", "application/octet-stream");
+        String name = target.optString("name", "media" + suffix(null, mime));
+
+        android.content.ContentResolver resolver = getContext().getContentResolver();
+        android.content.ContentValues values = new android.content.ContentValues();
+        values.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+        values.put(MediaStore.MediaColumns.MIME_TYPE, mime);
+
+        Uri collection; String relativeDir;
+        if (mime.startsWith("video/")) { collection = MediaStore.Video.Media.EXTERNAL_CONTENT_URI; relativeDir = android.os.Environment.DIRECTORY_MOVIES; }
+        else if (mime.startsWith("audio/")) { collection = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI; relativeDir = android.os.Environment.DIRECTORY_MUSIC; }
+        else { collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI; relativeDir = android.os.Environment.DIRECTORY_PICTURES; }
+
+        if (Build.VERSION.SDK_INT >= 29) {
+            values.put(MediaStore.MediaColumns.RELATIVE_PATH, relativeDir + "/NYX Restored");
+            values.put(MediaStore.MediaColumns.IS_PENDING, 1);
+        }
+
+        Uri dest = resolver.insert(collection, values);
+        if (dest == null) throw new Exception("Could not create destination file");
+        try (InputStream in = new FileInputStream(media); OutputStream out = resolver.openOutputStream(dest)) {
+            if (out == null) throw new Exception("Could not open destination file");
+            byte[] buf = new byte[128 * 1024]; int n;
+            while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
+        } catch (Exception e) {
+            resolver.delete(dest, null, null);
+            throw e;
+        }
+        if (Build.VERSION.SDK_INT >= 29) {
+            values.clear(); values.put(MediaStore.MediaColumns.IS_PENDING, 0);
+            resolver.update(dest, values, null, null);
+        }
+
+        if (!media.delete()) { /* file copied out successfully; leftover private copy is not fatal */ }
+        File legacy = new File(root(), id + ".nyx");
+        if (legacy.exists()) legacy.delete();
+        removeMetaEntry(id);
+    }
+
+    private synchronized void removeMetaEntry(String id) throws Exception {
+        List<String> keep = new ArrayList<>();
+        if (metaFile().exists()) for (String x : readAll(metaFile()).split("\\n"))
+            if (!x.trim().isEmpty() && !id.equals(new org.json.JSONObject(x).optString("id"))) keep.add(x);
+        writeAll(metaFile(), String.join("\n", keep));
     }
 
     private File mediaFile(org.json.JSONObject meta) throws Exception { String path=meta.optString("path",""); if(!path.isEmpty()){File f=new File(path);if(f.isFile()&&f.canRead())return f;} String id=meta.optString("id",""); String name=meta.optString("name","media"); if(!id.isEmpty()){File fallback=new File(mediaDir(),id+suffix(name,meta.optString("mime","application/octet-stream"))); if(fallback.isFile()&&fallback.canRead())return fallback;} throw new Exception("Media file is missing"); }
