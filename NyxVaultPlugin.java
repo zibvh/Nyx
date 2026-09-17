@@ -959,6 +959,11 @@ public class NyxVaultPlugin extends Plugin {
     }
     private void writeAll(File f, String s) throws Exception { try (FileOutputStream o = new FileOutputStream(f)) { o.write(s.getBytes(StandardCharsets.UTF_8)); } }
     private void copy(InputStream in, OutputStream out) throws Exception { byte[] buf = new byte[64 * 1024]; int n; while ((n = in.read(buf)) != -1) out.write(buf, 0, n); }
+    private String sanitizeName(String name) {
+        if (name == null || name.trim().isEmpty()) return "media.bin";
+        String safe = name.replaceAll("[^A-Za-z0-9._-]", "_");
+        return safe.length() > 120 ? safe.substring(0, 120) : safe;
+    }
 
     private synchronized void appendMeta(String id, String name, String mime, long size, boolean uploaded, String resourceType, String originalUri, boolean originalRemoved, String path) throws Exception {
         List<String> rows = new ArrayList<>();
