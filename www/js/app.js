@@ -425,6 +425,7 @@
         console.log("[NYX] imported ids:", ids);
         if (ids.length) await ensureConcealPermission();
         let concealedCount = 0, failedCount = 0;
+        const failReasons = [];
         for (const id of ids) {
           try {
             const res = await Native.concealMedia({ id });
@@ -432,15 +433,18 @@
             if (res?.concealed) concealedCount++;
             else {
               failedCount++;
+              failReasons.push(res?.reason || "unknown");
               console.warn("[NYX] conceal did not complete for", id, "reason:", res?.reason);
             }
           } catch (e) {
             failedCount++;
+            const msg = e?.message || String(e);
+            failReasons.push(msg);
             console.error("[NYX] concealMedia threw for", id, ":", e);
           }
         }
         if (failedCount > 0) {
-          const msg = `NYX: ${concealedCount} of ${ids.length} originals concealed. ${failedCount} still visible in your gallery.`;
+          const msg = `NYX: ${concealedCount}/${ids.length} concealed. Errors: ${failReasons.join("; ")}`;
           console.warn("[NYX]", msg);
           try {
             if (typeof window.alert === "function") window.alert(msg);

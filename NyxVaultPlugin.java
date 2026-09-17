@@ -838,13 +838,41 @@ public class NyxVaultPlugin extends Plugin {
         if(Build.VERSION.SDK_INT>=30){
             java.util.ArrayList<Uri> list=new java.util.ArrayList<>(); list.add(uri);
             android.app.PendingIntent pi=MediaStore.createDeleteRequest(getContext().getContentResolver(),list);
-            getActivity().runOnUiThread(() -> { try { getActivity().startIntentSenderForResult(pi.getIntentSender(),DELETE_REQUEST_CODE,null,0,0,0); } catch(Exception e){ if(pendingConcealCall!=null){pendingConcealCall.reject("Could not open delete consent");pendingConcealCall=null;} } });
+            android.app.Activity act=getActivity();
+            if(act==null){
+                android.util.Log.e(TAG,"launchDeleteConsent: getActivity() is null");
+                throw new Exception("App activity unavailable (getActivity() null)");
+            }
+            act.runOnUiThread(() -> {
+                try {
+                    act.startIntentSenderForResult(pi.getIntentSender(),DELETE_REQUEST_CODE,null,0,0,0);
+                } catch(Exception e){
+                    android.util.Log.e(TAG,"launchDeleteConsent: startIntentSenderForResult failed",e);
+                    if(pendingConcealCall!=null){
+                        pendingConcealCall.reject("Could not open delete consent: "+e.getMessage());
+                        pendingConcealCall=null;
+                        concealInFlight=false; pumpConcealQueue();
+                    }
+                }
+            });
         } else if(Build.VERSION.SDK_INT==29){
             try {
                 int deleted=getContext().getContentResolver().delete(uri,null,null);
                 finishPendingConceal(deleted>0 || !existsInMediaStore(uri));
             } catch(android.app.RecoverableSecurityException rse){
-                getActivity().runOnUiThread(() -> { try { getActivity().startIntentSenderForResult(rse.getUserAction().getActionIntent().getIntentSender(),DELETE_REQUEST_CODE,null,0,0,0); } catch(Exception e){ if(pendingConcealCall!=null){pendingConcealCall.reject("Could not open delete consent");pendingConcealCall=null;} } });
+                android.app.Activity act=getActivity();
+                if(act==null){ throw new Exception("App activity unavailable (getActivity() null)"); }
+                act.runOnUiThread(() -> {
+                    try { act.startIntentSenderForResult(rse.getUserAction().getActionIntent().getIntentSender(),DELETE_REQUEST_CODE,null,0,0,0); }
+                    catch(Exception e){
+                        android.util.Log.e(TAG,"launchDeleteConsent (API29): startIntentSenderForResult failed",e);
+                        if(pendingConcealCall!=null){
+                            pendingConcealCall.reject("Could not open delete consent: "+e.getMessage());
+                            pendingConcealCall=null;
+                            concealInFlight=false; pumpConcealQueue();
+                        }
+                    }
+                });
             }
         }
     }
