@@ -220,7 +220,7 @@ $("#deleteSelectedBtn").onclick=async()=>{
   if(!Native||selectedIds.size===0)return;
   const ids=Array.from(selectedIds);
   const label=ids.length===1?"this item":`these ${ids.length} items`;
-  if(!confirm(`Delete ${label} from the vault? This cannot be undone. The Cloudinary backup, if any, is not affected.`))return;
+  if(!confirm(`Delete ${label} from the vault? This cannot be undone.`))return;
   try{await Native.deleteMediaBatch({ids})}catch(e){}
   setSelectMode(false);await renderVault();
 };
@@ -228,7 +228,7 @@ $("#restoreSelectedBtn").onclick=async()=>{
   if(!Native||selectedIds.size===0)return;
   const ids=Array.from(selectedIds);
   const label=ids.length===1?"this item":`these ${ids.length} items`;
-  if(!confirm(`Move ${label} back to your regular device storage and remove from the vault? The Cloudinary backup, if any, is not affected.`))return;
+  if(!confirm(`Move ${label} back to your regular device storage and remove from the vault?`))return;
   try{await Native.restoreMediaBatch({ids})}catch(e){}
   setSelectMode(false);await renderVault();
 };

@@ -603,7 +603,7 @@ public class NyxVaultPlugin extends Plugin {
             }
             File dir=mediaDir(); File[] files=dir.listFiles();
             if(files!=null){
-                java.util.Arrays.sort(files,(a,b)->Long.compare(a.lastModified(),b.lastModified()));
+                java.util.Arrays.sort(files,(a,b)->Long.compare(b.lastModified(),a.lastModified()));
                 for(File f:files){
                     if(!f.isFile()||f.getName().equals(".nomedia"))continue;
                     String fn=f.getName(); int dot=fn.lastIndexOf('.'); if(dot<=0)continue;
