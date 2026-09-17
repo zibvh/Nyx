@@ -35,10 +35,10 @@ public class NyxUploadWorker extends Worker {
         if (id == null || id.trim().isEmpty()) return Result.failure();
         try {
             JSONObject meta = findMeta(id);
-            if (meta == null) return Result.failure();
+            if (meta == null) return Result.retry();
             if (meta.optBoolean("uploaded", false)) return Result.success();
             File file = mediaFile(meta);
-            if (!file.isFile() || !file.canRead()) return Result.failure();
+            if (!file.isFile() || !file.canRead()) return Result.retry();
             String mime = meta.optString("mime", "application/octet-stream");
             String resource = mime.startsWith("video/") ? "video" : (mime.startsWith("audio/") ? "video" : "image");
             String publicId = id;
@@ -53,7 +53,7 @@ public class NyxUploadWorker extends Worker {
 
     private boolean isRetryable(Exception e) {
         String m = e.getMessage() == null ? "" : e.getMessage().toLowerCase();
-        return m.contains("timeout") || m.contains("connection") || m.contains("network") || m.contains("reset") || m.contains("503") || m.contains("502") || m.contains("429");
+        return m.contains("timeout") || m.contains("connection") || m.contains("network") || m.contains("reset") || m.contains("broken pipe") || m.contains("503") || m.contains("502") || m.contains("500") || m.contains("429");
     }
 
     private void uploadMultipart(String id, File file, String resource, String publicId, long size) throws Exception {
