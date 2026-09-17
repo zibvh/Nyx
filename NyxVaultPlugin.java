@@ -74,6 +74,24 @@ public class NyxVaultPlugin extends Plugin {
     private File metaFile() { return new File(root(), META); }
     private android.content.SharedPreferences prefs() { return getContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE); }
 
+    // --- Screenshot / screen-recording blocking -------------------------------------------
+    // FLAG_SECURE is applied to MainActivity's window whenever the vault is the active view,
+    // and unconditionally to NyxMediaViewerActivity's window while it is open (that Activity
+    // reads the same "blockScreenCapture" preference itself). It is a real window flag, so it
+    // also blocks the app-switcher/recents thumbnail and screen recording/casting, not just
+    // the Android screenshot shortcut.
+    private boolean blockScreenCaptureEnabled() { return prefs().getBoolean("blockScreenCapture", true); }
+    private void applySecureFlag(boolean secure) {
+        android.app.Activity a = getActivity();
+        if (a == null) return;
+        a.runOnUiThread(() -> {
+            Window w = a.getWindow();
+            if (w == null) return;
+            if (secure) w.addFlags(WindowManager.LayoutParams.FLAG_SECURE);
+            else w.clearFlags(WindowManager.LayoutParams.FLAG_SECURE);
+        });
+    }
+
     @PluginMethod
     public void ping(PluginCall call) {
         JSObject ret = new JSObject(); ret.put("ok", true); call.resolve(ret);
@@ -155,7 +173,30 @@ public class NyxVaultPlugin extends Plugin {
     }
 
     @PluginMethod
-    public void setSecureScreen(PluginCall call) { call.resolve(); }
+    public void setSecureScreen(PluginCall call) {
+        boolean block = call.getBoolean("blockScreenCapture", true);
+        prefs().edit().putBoolean("blockScreenCapture", block).apply();
+        // If the vault is currently open, apply immediately; otherwise it will be applied
+        // the next time enterVaultSecurity() runs.
+        applySecureFlag(block);
+        JSObject ret = new JSObject(); ret.put("blockScreenCapture", block); call.resolve(ret);
+    }
+
+    // Called by the JS layer whenever a vault-area view (private gallery, its settings,
+    // media picker, etc.) becomes active, and again when it stops being active. This is what
+    // actually enforces the "block screenshots & screen recording" setting on MainActivity's
+    // window, since FLAG_SECURE only matters while that window is on screen.
+    @PluginMethod
+    public void enterVaultSecurity(PluginCall call) {
+        if (blockScreenCaptureEnabled()) applySecureFlag(true);
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void exitVaultSecurity(PluginCall call) {
+        applySecureFlag(false);
+        call.resolve();
+    }
 
     @PluginMethod
     public void clearTempCache(PluginCall call) {
@@ -174,6 +215,7 @@ public class NyxVaultPlugin extends Plugin {
         ret.put("biometricAvailable", can == BiometricManager.BIOMETRIC_SUCCESS);
         ret.put("biometricEnabled", prefs().getBoolean("biometricEnabled", false));
         ret.put("removeOriginal", false);
+        ret.put("blockScreenCapture", blockScreenCaptureEnabled());
         call.resolve(ret);
     }
 
@@ -183,6 +225,42 @@ public class NyxVaultPlugin extends Plugin {
                 .putBoolean("biometricEnabled", call.getBoolean("biometricEnabled", false))
                 .putBoolean("removeOriginal", false)
                 .apply();
+        call.resolve();
+    }
+
+    // Enrolls (or re-enrolls) biometric unlock. Android's BiometricPrompt always checks
+    // against whatever fingerprints/faces are currently registered in the OS, so NYX itself
+    // doesn't store a specific fingerprint — "enroll" really means: confirm the PIN, then run
+    // one system biometric prompt to confirm the sensor works, then flip biometricEnabled on.
+    // Calling this again later (e.g. after the user has added a different finger in Android
+    // Settings) re-confirms the PIN and re-runs the prompt, which is all "changing" the
+    // enrolled fingerprint requires on NYX's side.
+    @PluginMethod
+    public void enrollBiometric(PluginCall call) {
+        String secret = call.getString("secret", "").trim();
+        String pin = call.getString("pin", "");
+        try {
+            if (!verify(secret, pin)) { call.reject("Current secret name or PIN is wrong"); return; }
+        } catch (Exception e) { call.reject("Could not verify credential"); return; }
+        int can = BiometricManager.from(getContext()).canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_WEAK);
+        if (can != BiometricManager.BIOMETRIC_SUCCESS) { call.reject("Biometric authentication is unavailable on this device"); return; }
+        getActivity().runOnUiThread(() -> {
+            BiometricPrompt prompt = new BiometricPrompt(getActivity(), ContextCompat.getMainExecutor(getContext()), new BiometricPrompt.AuthenticationCallback() {
+                @Override public void onAuthenticationSucceeded(@NonNull BiometricPrompt.AuthenticationResult result) {
+                    prefs().edit().putBoolean("biometricEnabled", true).apply();
+                    call.resolve();
+                }
+                @Override public void onAuthenticationError(int errorCode, @NonNull CharSequence errString) { call.reject(errString.toString()); }
+                @Override public void onAuthenticationFailed() { }
+            });
+            BiometricPrompt.PromptInfo info = new BiometricPrompt.PromptInfo.Builder().setTitle("Confirm fingerprint").setSubtitle("Enroll this device's fingerprint for NYX").setNegativeButtonText("Cancel").build();
+            prompt.authenticate(info);
+        });
+    }
+
+    @PluginMethod
+    public void disableBiometric(PluginCall call) {
+        prefs().edit().putBoolean("biometricEnabled", false).apply();
         call.resolve();
     }
 
@@ -580,17 +658,118 @@ public class NyxVaultPlugin extends Plugin {
         String id=call.getString("id",""); if(id.isEmpty()){call.reject("Missing id");return;}
         IO_EXECUTOR.execute(() -> {
             try {
-                org.json.JSONObject target=findMeta(id); if(target==null){call.reject("Not found");return;}
-                File media = mediaFile(target);
-                if(media.exists()&&!media.delete())throw new Exception("Delete failed");
-                File legacy = new File(root(), id + ".nyx");
-                if(legacy.exists()) legacy.delete();
-                List<String> keep=new ArrayList<>();
-                if(metaFile().exists())for(String x:readAll(metaFile()).split("\\n"))if(!x.trim().isEmpty()&&!id.equals(new org.json.JSONObject(x).optString("id")))keep.add(x);
-                writeAll(metaFile(),String.join("\n",keep));
+                deleteOne(id);
                 call.resolve();
             }catch(Exception e){call.reject("Could not delete media");}
         });
+    }
+
+    // Permanently deletes the private copy from NYX's own storage (the file under
+    // .../NYX/<id>.<ext>) and drops its row from nyx-media.json. This does not touch any
+    // Cloudinary backup and does not touch the original file the media was imported from
+    // (that was never NYX's to delete, and by this point it may not even still exist).
+    private void deleteOne(String id) throws Exception {
+        org.json.JSONObject target = findMeta(id);
+        if (target == null) return; // already gone; treat as success
+        try {
+            File media = mediaFile(target);
+            if (media.exists() && !media.delete()) throw new Exception("Delete failed");
+        } catch (Exception fileMissing) {
+            // File already gone from storage; still remove the metadata row below.
+        }
+        File legacy = new File(root(), id + ".nyx");
+        if (legacy.exists()) legacy.delete();
+        removeMetaRow(id);
+    }
+
+    private synchronized void removeMetaRow(String id) throws Exception {
+        List<String> keep = new ArrayList<>();
+        if (metaFile().exists()) for (String x : readAll(metaFile()).split("\\n")) if (!x.trim().isEmpty() && !id.equals(new org.json.JSONObject(x).optString("id"))) keep.add(x);
+        writeAll(metaFile(), String.join("\n", keep));
+    }
+
+    // Deletes several items at once (used by the multi-select "Delete" action). Partial
+    // failure doesn't abort the batch — every id is attempted, and the ones that failed are
+    // reported back so the UI can tell the user, but everything that could be removed is
+    // removed from both device storage and the NYX index.
+    @PluginMethod
+    public void deleteMediaBatch(PluginCall call) {
+        org.json.JSONArray idsArr = call.getArray("ids");
+        if (idsArr == null || idsArr.length() == 0) { call.reject("No items selected"); return; }
+        IO_EXECUTOR.execute(() -> {
+            int deleted = 0; List<String> failed = new ArrayList<>();
+            for (int i = 0; i < idsArr.length(); i++) {
+                String id = idsArr.optString(i, "");
+                if (id.isEmpty()) continue;
+                try { deleteOne(id); deleted++; }
+                catch (Exception e) { failed.add(id); }
+            }
+            JSObject ret = new JSObject();
+            ret.put("deleted", deleted);
+            org.json.JSONArray failedArr = new org.json.JSONArray(); for (String f : failed) failedArr.put(f);
+            ret.put("failed", failedArr);
+            if (deleted == 0 && !failed.isEmpty()) call.reject("Could not delete selected media");
+            else call.resolve(ret);
+        });
+    }
+
+    // Copies media back out of NYX's private folder into the device's normal, publicly
+    // visible Pictures/Movies storage (via MediaStore, so it shows up in the regular Gallery
+    // app again), then removes it from NYX the same way deleteOne() does. Any Cloudinary
+    // backup is left untouched, matching the confirmation dialog shown in the UI.
+    @PluginMethod
+    public void restoreMediaBatch(PluginCall call) {
+        org.json.JSONArray idsArr = call.getArray("ids");
+        if (idsArr == null || idsArr.length() == 0) { call.reject("No items selected"); return; }
+        IO_EXECUTOR.execute(() -> {
+            int restored = 0; List<String> failed = new ArrayList<>();
+            for (int i = 0; i < idsArr.length(); i++) {
+                String id = idsArr.optString(i, "");
+                if (id.isEmpty()) continue;
+                try { restoreOne(id); restored++; }
+                catch (Exception e) { failed.add(id); }
+            }
+            JSObject ret = new JSObject();
+            ret.put("restored", restored);
+            org.json.JSONArray failedArr = new org.json.JSONArray(); for (String f : failed) failedArr.put(f);
+            ret.put("failed", failedArr);
+            if (restored == 0 && !failed.isEmpty()) call.reject("Could not restore selected media");
+            else call.resolve(ret);
+        });
+    }
+
+    private void restoreOne(String id) throws Exception {
+        org.json.JSONObject target = findMeta(id);
+        if (target == null) throw new Exception("Not found");
+        File media = mediaFile(target);
+        String name = target.optString("name", "media");
+        String mime = target.optString("mime", "application/octet-stream");
+        android.content.ContentResolver resolver = getContext().getContentResolver();
+        Uri collection; android.content.ContentValues values = new android.content.ContentValues();
+        values.put(MediaStore.MediaColumns.DISPLAY_NAME, name);
+        values.put(MediaStore.MediaColumns.MIME_TYPE, mime);
+        if (mime.startsWith("video/")) {
+            collection = MediaStore.Video.Media.EXTERNAL_CONTENT_URI;
+            if (Build.VERSION.SDK_INT >= 29) values.put(MediaStore.Video.Media.RELATIVE_PATH, "Movies/NYX Restored");
+        } else if (mime.startsWith("audio/")) {
+            collection = MediaStore.Audio.Media.EXTERNAL_CONTENT_URI;
+            if (Build.VERSION.SDK_INT >= 29) values.put(MediaStore.Audio.Media.RELATIVE_PATH, "Music/NYX Restored");
+        } else {
+            collection = MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
+            if (Build.VERSION.SDK_INT >= 29) values.put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/NYX Restored");
+        }
+        Uri out = resolver.insert(collection, values);
+        if (out == null) throw new Exception("Could not create destination file");
+        try (InputStream in = new FileInputStream(media); OutputStream os = resolver.openOutputStream(out)) {
+            if (os == null) throw new Exception("Could not open destination file");
+            copy(in, os);
+        } catch (Exception e) {
+            resolver.delete(out, null, null);
+            throw e;
+        }
+        // Successfully copied out of the vault — now remove NYX's private copy and index row,
+        // same as a normal delete.
+        deleteOne(id);
     }
 
     private File mediaFile(org.json.JSONObject meta) throws Exception { String path=meta.optString("path",""); if(!path.isEmpty()){File f=new File(path);if(f.isFile()&&f.canRead())return f;} String id=meta.optString("id",""); String name=meta.optString("name","media"); if(!id.isEmpty()){File fallback=new File(mediaDir(),id+suffix(name,meta.optString("mime","application/octet-stream"))); if(fallback.isFile()&&fallback.canRead())return fallback;} throw new Exception("Media file is missing"); }

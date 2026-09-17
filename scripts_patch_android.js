@@ -3,7 +3,7 @@ const path=require('path');
 const root=path.resolve('android');
 const pkg=path.join(root,'app','src','main','java','app','nyxvault');
 fs.mkdirSync(pkg,{recursive:true});
-for(const f of ['NyxVaultPlugin.java','NyxMediaViewerActivity.java','NyxUploadWorker.java','NyxUploadDebug.java']) fs.copyFileSync(path.join('android-template','app','src','main','java','app','nyxvault',f),path.join(pkg,f));
+for(const f of ['NyxVaultPlugin.java','NyxMediaViewerActivity.java','NyxUploadWorker.java']) fs.copyFileSync(path.join('android-template','app','src','main','java','app','nyxvault',f),path.join(pkg,f));
 function findMain(dir){
   for(const n of fs.readdirSync(dir,{withFileTypes:true})){
     const p=path.join(dir,n.name);

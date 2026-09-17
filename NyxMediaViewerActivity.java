@@ -31,6 +31,9 @@ public class NyxMediaViewerActivity extends Activity {
 
     @Override public void onCreate(@Nullable Bundle saved){
         super.onCreate(saved);
+        if(getSharedPreferences("nyx-secure", MODE_PRIVATE).getBoolean("blockScreenCapture", true)){
+            getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE);
+        }
         getWindow().setStatusBarColor(Color.rgb(7,7,7));
         getWindow().setNavigationBarColor(Color.rgb(7,7,7));
         getWindow().setFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS, WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);

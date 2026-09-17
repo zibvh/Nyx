@@ -18,7 +18,7 @@ if(window.Capacitor){
 const notes=JSON.parse(localStorage.getItem("nyx_notes")||"[]");
 const state=JSON.parse(localStorage.getItem("nyx_state")||'{"setup":false,"displayName":"Notes"}');
 let pendingSecret="", activeMediaId="";
-const VAULT_VIEWS=new Set(["#vaultView","#vaultSettingsView","#uploadDebugView","#pickerView","#deleteConfirmView"]);
+const VAULT_VIEWS=new Set(["#vaultView","#vaultSettingsView","#pickerView"]);
 let vaultLockPending=false;
 const save=()=>localStorage.setItem("nyx_state",JSON.stringify(state));
 async function waitForNative(timeout=5000){
@@ -93,10 +93,13 @@ $("#vaultSettingsBtn").onclick=async()=>{
   await refreshSecureScreenToggle();
 };
 async function refreshBiometricToggle(){
-  const toggle=$("#biometricToggle");
-  if(!Native){toggle.checked=false;toggle.disabled=true;return}
-  try{const s=await Native.getPrivateSettings();toggle.disabled=!s?.biometricAvailable;toggle.checked=!!s?.biometricEnabled}
-  catch(e){toggle.checked=false}
+  const toggle=$("#biometricToggle"),changeBtn=$("#changeFingerprintBtn");
+  if(!Native){toggle.checked=false;toggle.disabled=true;changeBtn.classList.add("hidden");return}
+  try{
+    const s=await Native.getPrivateSettings();
+    toggle.disabled=!s?.biometricAvailable;toggle.checked=!!s?.biometricEnabled;
+    changeBtn.classList.toggle("hidden",!s?.biometricEnabled);
+  }catch(e){toggle.checked=false;changeBtn.classList.add("hidden")}
 }
 async function refreshSecureScreenToggle(){
   const toggle=$("#secureScreenToggle");
@@ -131,8 +134,13 @@ $("#bioConfirmBtn").onclick=async()=>{
     await Native.enrollBiometric({secret,pin});
     $("#biometricConfirmBox").classList.add("hidden");
     $("#biometricToggle").checked=true;
+    $("#changeFingerprintBtn").classList.remove("hidden");
     $("#biometricSettingsMsg").textContent="Fingerprint unlock enabled.";
   }catch(e){$("#biometricSettingsMsg").textContent=e?.message||"Could not enable fingerprint unlock."}
+};
+$("#changeFingerprintBtn").onclick=()=>{
+  $("#bioConfirmSecret").value="";$("#bioConfirmPin").value="";$("#biometricSettingsMsg").textContent="";
+  $("#biometricConfirmBox").classList.remove("hidden");
 };
 $("#changeCredentialBtn").onclick=async()=>{
   const oldSecret=$("#currentSecret").value.trim(),oldPin=$("#currentPin").value.trim(),newSecret=$("#newSecret").value.trim(),newPin=$("#newPin").value.trim();
@@ -148,10 +156,6 @@ $("#changeCredentialBtn").onclick=async()=>{
   }catch(e){$("#securityMsg").textContent=e?.message||"Could not change security details."}
 };
 document.querySelectorAll("[data-back]").forEach(b=>b.onclick=()=>show("#"+b.dataset.back));
-$("#openUploadDebugBtn").onclick=async()=>{show("#uploadDebugView");await refreshUploadDebug()};
-async function refreshUploadDebug(){if(!Native)return;try{const r=await Native.getUploadDebugLog();$("#uploadDebugText").textContent=r?.log||"(empty)"}catch(e){$("#uploadDebugText").textContent="Could not read log."}}
-$("#refreshUploadDebugBtn").onclick=refreshUploadDebug;
-$("#clearUploadDebugBtn").onclick=async()=>{if(!Native)return;try{await Native.clearUploadDebugLog();await refreshUploadDebug()}catch(e){}};
 let setupBusy=false;function setSetupBusy(busy,message){setupBusy=busy;const btn=$("#finishSetup");if(!btn)return;btn.disabled=busy;btn.textContent=busy?(message||"Setting up…"):"Finish setup"}
 $("#finishSetup").onclick=async()=>{if(setupBusy)return;const secret=$("#secretName").value.trim(),pin=$("#pin").value.trim();$("#setupMsg").textContent="";if(!secret||!/^\d{6}$/.test(pin)){$("#setupMsg").textContent="Enter a secret name and a valid 6-digit PIN.";return}setSetupBusy(true,"Setting up…");try{Native=await waitForNative(8000);if(!Native)throw new Error("Private storage could not start.");await Native.saveCredential({secret,pin,removeOriginal:false});state.setup=true;save();pendingSetupCred={secret,pin};let canBio=false;try{const s=await Native.getPrivateSettings();canBio=!!s?.biometricAvailable}catch(e){}show(canBio?"#biometricSetupView":"#notesView")}catch(e){$("#setupMsg").textContent=e?.message||"Could not finish setup."}finally{setSetupBusy(false)}};
 let pendingSetupCred=null;
@@ -165,10 +169,13 @@ $("#importBtn").onclick=()=>show("#pickerView");
 async function syncUploads(){try{if(Native) await Native.syncUploads()}catch(e){}}
 async function choosePicker(source){try{const r=await Native.pickMedia({source});if(r?.imported){await syncUploads();await renderVault();setTimeout(()=>show("#vaultView"),200)}}catch(e){}}
 $("#pickPhotos").onclick=()=>choosePicker("photos");$("#pickFiles").onclick=()=>choosePicker("files");
-let pressTimer=null,pressFiredLongPress=false;
+let pressTimer=null,pressFiredLongPress=false,pressStartX=0,pressStartY=0;
+const LONGPRESS_MOVE_TOLERANCE=10; // px of finger drift still counted as a "hold", not a drag
 $("#vaultGrid").addEventListener("pointerdown",e=>{
   const card=e.target.closest(".media"); if(!card||!Native)return;
   pressFiredLongPress=false;
+  pressStartX=e.clientX;pressStartY=e.clientY;
+  clearTimeout(pressTimer);
   pressTimer=setTimeout(()=>{
     pressFiredLongPress=true;
     if(!selectMode)setSelectMode(true);
@@ -176,12 +183,29 @@ $("#vaultGrid").addEventListener("pointerdown",e=>{
     if(navigator.vibrate)navigator.vibrate(15);
   },500);
 });
-["pointerup","pointerleave","pointercancel"].forEach(evt=>$("#vaultGrid").addEventListener(evt,()=>{clearTimeout(pressTimer)}));
+$("#vaultGrid").addEventListener("pointermove",e=>{
+  if(!pressTimer)return;
+  if(Math.abs(e.clientX-pressStartX)>LONGPRESS_MOVE_TOLERANCE||Math.abs(e.clientY-pressStartY)>LONGPRESS_MOVE_TOLERANCE){
+    clearTimeout(pressTimer);pressTimer=null;
+  }
+});
+["pointerup","pointerleave","pointercancel"].forEach(evt=>$("#vaultGrid").addEventListener(evt,()=>{clearTimeout(pressTimer);pressTimer=null}));
+// Some WebViews raise a native context menu on a held touch, which both looks wrong here and
+// can itself fire a pointercancel that kills the long-press timer before it completes.
+$("#vaultGrid").addEventListener("contextmenu",e=>{if(e.target.closest(".media"))e.preventDefault()});
 $("#vaultGrid").addEventListener("click",async e=>{
   const card=e.target.closest(".media"); if(!card||!Native)return;
   if(pressFiredLongPress){pressFiredLongPress=false;return}
   if(selectMode){toggleSelected(card.dataset.id,card);return}
-  try{await Native.openMedia({id:card.dataset.id})}catch(e){}
+  try{
+    // Opening media launches a separate native Activity on top of this WebView, which makes
+    // Capacitor fire an appStateChange(isActive:false) the same as if the app were backgrounded.
+    // Mark this as an intentional, in-app navigation so the auto-lock listener below doesn't
+    // treat "came back from the media viewer" as "app was reopened" and bounce us to Notes.
+    openingNativeMediaViewer=true;
+    setTimeout(()=>{openingNativeMediaViewer=false},3000); // safety reset if no appStateChange fires
+    await Native.openMedia({id:card.dataset.id});
+  }catch(e){ openingNativeMediaViewer=false; }
 });
 $("#selectCancelBtn").onclick=()=>setSelectMode(false);
 $("#selectAllBtn").onclick=()=>{
@@ -216,11 +240,15 @@ function forceLock(){
   show("#notesView");
   Native?.clearTempCache?.().catch?.(()=>{});
 }
+let openingNativeMediaViewer=false;
 function setupAppStateAutoLock(){
   const AppPlugin=window.Capacitor?.Plugins?.App;
   if(!AppPlugin?.addListener)return;
   AppPlugin.addListener("appStateChange",({isActive})=>{
     if(!isActive){
+      // Don't arm the auto-lock when we're the ones who just launched the native media
+      // viewer on top of ourselves — that's not the user backgrounding the app.
+      if(openingNativeMediaViewer){openingNativeMediaViewer=false;return}
       if(isVaultView(currentViewId()))vaultLockPending=true;
     }else{
       if(vaultLockPending)forceLock();
