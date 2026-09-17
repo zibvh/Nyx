@@ -65,6 +65,7 @@ public class NyxVaultPlugin extends Plugin {
     private static final String META = "nyx-media.json";
     private static final String PREFS = "nyx-secure";
     private static final String KEY_ALIAS = "nyx_media_aes_key_v2";
+    private static final String BIO_KEY_ALIAS = "nyx_biometric_aes_key_v1";
     private static final int PBKDF2_ITERATIONS = 150000;
     private static final int GCM_TAG_BITS = 128;
     private static final int PICK_CODE = 7137;
@@ -93,9 +94,9 @@ public class NyxVaultPlugin extends Plugin {
                     .putString("salt", Base64.encodeToString(salt, Base64.NO_WRAP))
                     .putString("verifier", verifier)
                     .putString("secretVerifier", secretVerifier)
-                    .putBoolean("biometricEnabled", false)
                     .putBoolean("removeOriginal", false)
                     .apply();
+            wipeBiometricKey();
             ensureNyxNoMediaMarker();
             call.resolve();
         } catch (Exception e) { call.reject("Credential setup failed"); }
@@ -120,6 +121,8 @@ public class NyxVaultPlugin extends Plugin {
             prefs().edit().putString("salt", Base64.encodeToString(salt, Base64.NO_WRAP))
                     .putString("verifier", hash(newPin + ":" + newSecret, salt))
                     .putString("secretVerifier", hash(newSecret, salt)).apply();
+            // Biometric unlock guards a random token, not the PIN itself, so changing
+            // the PIN does NOT disturb fingerprint enrollment.
             JSObject ret = new JSObject(); ret.put("ok", true); call.resolve(ret);
         } catch (Exception e) { call.reject("Could not change credential"); }
     }
@@ -170,36 +173,183 @@ public class NyxVaultPlugin extends Plugin {
     @PluginMethod
     public void getPrivateSettings(PluginCall call) {
         JSObject ret = new JSObject();
-        int can = BiometricManager.from(getContext()).canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_WEAK);
+        int can = BiometricManager.from(getContext()).canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG);
         ret.put("biometricAvailable", can == BiometricManager.BIOMETRIC_SUCCESS);
-        ret.put("biometricEnabled", prefs().getBoolean("biometricEnabled", false));
+        ret.put("biometricEnabled", prefs().contains("bio_blob") && keystoreHasAlias(BIO_KEY_ALIAS));
         ret.put("removeOriginal", false);
         call.resolve(ret);
     }
 
     @PluginMethod
     public void setPrivateSettings(PluginCall call) {
-        prefs().edit()
-                .putBoolean("biometricEnabled", call.getBoolean("biometricEnabled", false))
-                .putBoolean("removeOriginal", false)
-                .apply();
+        // Kept for backward compatibility with older JS; no longer the source of truth
+        // for biometric state (enrollBiometric/disableBiometric own that now).
+        call.resolve();
+    }
+
+    private boolean keystoreHasAlias(String alias) {
+        try {
+            KeyStore ks = KeyStore.getInstance("AndroidKeyStore");
+            ks.load(null);
+            return ks.containsAlias(alias);
+        } catch (Exception e) { return false; }
+    }
+
+    /** Deletes any existing biometric key + encrypted blob. A real removal, not a flag flip. */
+    private void wipeBiometricKey() {
+        try {
+            KeyStore ks = KeyStore.getInstance("AndroidKeyStore");
+            ks.load(null);
+            if (ks.containsAlias(BIO_KEY_ALIAS)) ks.deleteEntry(BIO_KEY_ALIAS);
+        } catch (Exception ignored) {}
+        prefs().edit().remove("bio_blob").remove("bio_iv").apply();
+    }
+
+    /** Creates a fresh key that is invalidated the moment the device's fingerprint
+     *  enrollment changes (new print added/removed) and requires a fresh biometric
+     *  auth for every use. This is what makes "removable/changeable" actually real
+     *  at the OS level instead of just a UI toggle. */
+    private SecretKey createBiometricKey() throws Exception {
+        KeyGenerator kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
+        KeyGenParameterSpec.Builder spec = new KeyGenParameterSpec.Builder(BIO_KEY_ALIAS,
+                KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT)
+                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                .setKeySize(256)
+                .setUserAuthenticationRequired(true)
+                .setInvalidatedByBiometricEnrollment(true);
+        kg.init(spec.build());
+        return kg.generateKey();
+    }
+
+    private SecretKey getBiometricKey() throws Exception {
+        KeyStore ks = KeyStore.getInstance("AndroidKeyStore");
+        ks.load(null);
+        KeyStore.SecretKeyEntry entry = (KeyStore.SecretKeyEntry) ks.getEntry(BIO_KEY_ALIAS, null);
+        if (entry == null) return null;
+        return entry.getSecretKey();
+    }
+
+    /** Step 1 of enabling fingerprint unlock: caller must already have verified the
+     *  secret+PIN via verifyCredential before calling this. We re-verify server-side
+     *  here too, so JS can't skip the check. */
+    @PluginMethod
+    public void enrollBiometric(PluginCall call) {
+        String secret = call.getString("secret", "");
+        String pin = call.getString("pin", "");
+        try {
+            if (!verify(secret, pin)) { call.reject("Current secret name or PIN is wrong"); return; }
+            int can = BiometricManager.from(getContext()).canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG);
+            if (can != BiometricManager.BIOMETRIC_SUCCESS) { call.reject("No usable fingerprint/biometric is set up on this device"); return; }
+
+            wipeBiometricKey();
+            SecretKey key = createBiometricKey();
+
+            Cipher cipher = Cipher.getInstance(KeyProperties.KEY_ALGORITHM_AES + "/" + KeyProperties.BLOCK_MODE_GCM + "/" + KeyProperties.ENCRYPTION_PADDING_NONE);
+            cipher.init(Cipher.ENCRYPT_MODE, key);
+            BiometricPrompt.CryptoObject cryptoObject = new BiometricPrompt.CryptoObject(cipher);
+
+            getActivity().runOnUiThread(() -> {
+                BiometricPrompt prompt = new BiometricPrompt(getActivity(), ContextCompat.getMainExecutor(getContext()), new BiometricPrompt.AuthenticationCallback() {
+                    @Override public void onAuthenticationSucceeded(@NonNull BiometricPrompt.AuthenticationResult result) {
+                        try {
+                            Cipher c = result.getCryptoObject().getCipher();
+                            // A random token unrelated to the PIN. Fingerprint unlock only
+                            // has to prove "this is decryptable", not carry the PIN's value,
+                            // so changing the PIN later never disturbs this enrollment.
+                            byte[] token = new byte[32];
+                            new SecureRandom().nextBytes(token);
+                            byte[] enc = c.doFinal(token);
+                            prefs().edit()
+                                    .putString("bio_blob", Base64.encodeToString(enc, Base64.NO_WRAP))
+                                    .putString("bio_iv", Base64.encodeToString(c.getIV(), Base64.NO_WRAP))
+                                    .apply();
+                            call.resolve();
+                        } catch (Exception e) {
+                            wipeBiometricKey();
+                            call.reject("Could not enable fingerprint unlock");
+                        }
+                    }
+                    @Override public void onAuthenticationError(int errorCode, @NonNull CharSequence errString) {
+                        wipeBiometricKey();
+                        call.reject(errString.toString());
+                    }
+                    @Override public void onAuthenticationFailed() { }
+                });
+                BiometricPrompt.PromptInfo info = new BiometricPrompt.PromptInfo.Builder()
+                        .setTitle("Enable fingerprint unlock")
+                        .setSubtitle("Confirm your fingerprint to enable it for NYX")
+                        .setNegativeButtonText("Cancel")
+                        .build();
+                prompt.authenticate(info, cryptoObject);
+            });
+        } catch (Exception e) {
+            wipeBiometricKey();
+            call.reject("Could not enable fingerprint unlock");
+        }
+    }
+
+    /** Real removal: deletes the OS key and the encrypted blob. After this, no
+     *  fingerprint can unlock NYX until enrollBiometric runs again with the PIN. */
+    @PluginMethod
+    public void disableBiometric(PluginCall call) {
+        wipeBiometricKey();
         call.resolve();
     }
 
     @PluginMethod
     public void authenticateBiometric(PluginCall call) {
-        if (!prefs().getBoolean("biometricEnabled", false)) { call.reject("Biometric unlock is disabled"); return; }
-        int can = BiometricManager.from(getContext()).canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_WEAK);
+        if (!prefs().contains("bio_blob") || !keystoreHasAlias(BIO_KEY_ALIAS)) {
+            call.reject("Biometric unlock is not enabled"); return;
+        }
+        int can = BiometricManager.from(getContext()).canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_STRONG);
         if (can != BiometricManager.BIOMETRIC_SUCCESS) { call.reject("Biometric authentication is unavailable"); return; }
-        getActivity().runOnUiThread(() -> {
-            BiometricPrompt prompt = new BiometricPrompt(getActivity(), ContextCompat.getMainExecutor(getContext()), new BiometricPrompt.AuthenticationCallback() {
-                @Override public void onAuthenticationSucceeded(@NonNull BiometricPrompt.AuthenticationResult result) { call.resolve(); }
-                @Override public void onAuthenticationError(int errorCode, @NonNull CharSequence errString) { call.reject(errString.toString()); }
-                @Override public void onAuthenticationFailed() { }
+        try {
+            SecretKey key = getBiometricKey();
+            if (key == null) { wipeBiometricKey(); call.reject("Biometric unlock is not enabled"); return; }
+            String ivB64 = prefs().getString("bio_iv", null);
+            String blobB64 = prefs().getString("bio_blob", null);
+            if (ivB64 == null || blobB64 == null) { wipeBiometricKey(); call.reject("Biometric unlock is not enabled"); return; }
+
+            Cipher cipher = Cipher.getInstance(KeyProperties.KEY_ALGORITHM_AES + "/" + KeyProperties.BLOCK_MODE_GCM + "/" + KeyProperties.ENCRYPTION_PADDING_NONE);
+            cipher.init(Cipher.DECRYPT_MODE, key, new GCMParameterSpec(GCM_TAG_BITS, Base64.decode(ivB64, Base64.NO_WRAP)));
+            BiometricPrompt.CryptoObject cryptoObject = new BiometricPrompt.CryptoObject(cipher);
+
+            getActivity().runOnUiThread(() -> {
+                BiometricPrompt prompt = new BiometricPrompt(getActivity(), ContextCompat.getMainExecutor(getContext()), new BiometricPrompt.AuthenticationCallback() {
+                    @Override public void onAuthenticationSucceeded(@NonNull BiometricPrompt.AuthenticationResult result) {
+                        try {
+                            Cipher c = result.getCryptoObject().getCipher();
+                            // Successfully decrypting the stored token (with the correct
+                            // GCM tag) is itself the proof: it's only possible with the
+                            // fingerprint-bound key, which only exists after enrollment
+                            // and is invalidated if enrolled fingerprints change. No PIN
+                            // comparison here, so PIN changes never affect this.
+                            c.doFinal(Base64.decode(blobB64, Base64.NO_WRAP));
+                            call.resolve();
+                        } catch (Exception e) {
+                            call.reject("Fingerprint verification failed; use your PIN");
+                        }
+                    }
+                    @Override public void onAuthenticationError(int errorCode, @NonNull CharSequence errString) {
+                        call.reject(errString.toString());
+                    }
+                    @Override public void onAuthenticationFailed() { }
+                });
+                BiometricPrompt.PromptInfo info = new BiometricPrompt.PromptInfo.Builder()
+                        .setTitle("Unlock NYX")
+                        .setSubtitle("Confirm your fingerprint")
+                        .setNegativeButtonText("Use PIN")
+                        .build();
+                prompt.authenticate(info, cryptoObject);
             });
-            BiometricPrompt.PromptInfo info = new BiometricPrompt.PromptInfo.Builder().setTitle("Unlock NYX").setSubtitle("Confirm your identity").setNegativeButtonText("Use PIN").build();
-            prompt.authenticate(info);
-        });
+        } catch (android.security.keystore.KeyPermanentlyInvalidatedException e) {
+            // Fingerprints were added/removed at the OS level since enrollment.
+            wipeBiometricKey();
+            call.reject("Device fingerprints changed; use your PIN and re-enable fingerprint unlock");
+        } catch (Exception e) {
+            call.reject("Biometric authentication is unavailable");
+        }
     }
 
     @PluginMethod
@@ -409,6 +559,18 @@ public class NyxVaultPlugin extends Plugin {
         String raw = CLOUDINARY_API_KEY + ":" + CLOUDINARY_API_SECRET;
         String encoded = Base64.encodeToString(raw.getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP);
         c.setRequestProperty("Authorization", "Basic " + encoded);
+    }
+
+    private String read(HttpURLConnection c) throws Exception {
+        InputStream in;
+        try { in = c.getInputStream(); } catch (Exception e) { in = c.getErrorStream(); }
+        if (in == null) return "";
+        try (InputStream x = in; ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            byte[] buf = new byte[8192];
+            int n;
+            while ((n = x.read(buf)) != -1) out.write(buf, 0, n);
+            return out.toString(StandardCharsets.UTF_8.name());
+        }
     }
 
     private void uploadMultipart(String id, File file, String resource, String folder, String publicId, long size) throws Exception {
