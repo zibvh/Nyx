@@ -77,8 +77,13 @@ public class NyxVaultPlugin extends Plugin {
     private static final int STRATEGY_CONSENT = 2;
     private static final int STRATEGY_MANAGE_MEDIA = 3;
     private static final String PREF_CONCEAL_STRATEGY = "concealStrategy";
+    private static final String TAG = "NyxVault";
     private PluginCall pendingConcealCall;
     private String pendingConcealId = "";
+    // Queue of ids waiting to be concealed one at a time, so multi-select imports
+    // don't overwrite pendingConcealCall/pendingConcealId before each one finishes.
+    private final java.util.ArrayDeque<String> concealQueue = new java.util.ArrayDeque<>();
+    private boolean concealInFlight = false;
 
     private File root() { File d = new File(getContext().getFilesDir(), ROOT); if (!d.exists()) d.mkdirs(); return d; }
     private File mediaDir() { File d = new File(new File(getContext().getFilesDir(), "vault"), "media"); if (!d.exists()) d.mkdirs(); ensureNyxNoMediaMarker(); return d; }
@@ -738,13 +743,62 @@ public class NyxVaultPlugin extends Plugin {
 
     @PluginMethod
     public void concealMedia(PluginCall call) {
-        String id=call.getString("id",""); if(id.isEmpty()){call.reject("Missing id");return;}
+        String id=call.getString("id","");
+        if(id.isEmpty()){
+            android.util.Log.e(TAG,"concealMedia: missing id");
+            call.reject("Missing id");
+            return;
+        }
+        android.util.Log.i(TAG,"concealMedia: queueing id="+id+" queueSize="+concealQueue.size()+" inFlight="+concealInFlight);
+        call.setKeepAlive(true);
+        concealCalls.put(id, call);
+        concealQueue.add(id);
+        pumpConcealQueue();
+    }
+
+    // id -> the JS call waiting on that id's result, so results route back correctly
+    // even though only one delete-consent dialog can be in flight at a time.
+    private final java.util.Map<String,PluginCall> concealCalls = new java.util.concurrent.ConcurrentHashMap<>();
+
+    private void pumpConcealQueue(){
+        if(concealInFlight){
+            android.util.Log.i(TAG,"pumpConcealQueue: already in flight, waiting");
+            return;
+        }
+        String id=concealQueue.poll();
+        if(id==null){
+            android.util.Log.i(TAG,"pumpConcealQueue: queue empty");
+            return;
+        }
+        PluginCall call=concealCalls.remove(id);
+        if(call==null){
+            android.util.Log.e(TAG,"pumpConcealQueue: no call stored for id="+id);
+            pumpConcealQueue();
+            return;
+        }
+        concealInFlight=true;
+        runConceal(id, call);
+    }
+
+    private void runConceal(String id, PluginCall call){
         try {
             org.json.JSONObject meta=findMeta(id);
-            if(meta==null){call.reject("Media not found");return;}
+            if(meta==null){
+                android.util.Log.e(TAG,"runConceal: no metadata found for id="+id);
+                call.reject("Media not found");
+                concealInFlight=false; pumpConcealQueue();
+                return;
+            }
             String original=meta.optString("original_uri","");
-            if(original.isEmpty()){JSObject r=new JSObject();r.put("concealed",true);r.put("reason","no-original");call.resolve(r);return;}
+            if(original.isEmpty()){
+                android.util.Log.i(TAG,"runConceal: id="+id+" has no original_uri, nothing to delete");
+                JSObject r=new JSObject();r.put("concealed",true);r.put("reason","no-original");call.resolve(r);
+                concealInFlight=false; pumpConcealQueue();
+                return;
+            }
+            android.util.Log.i(TAG,"runConceal: id="+id+" original="+original+" sdk="+Build.VERSION.SDK_INT);
             int strategy=concealStrategy();
+            android.util.Log.i(TAG,"runConceal: strategy="+strategy);
             if(Build.VERSION.SDK_INT>=30){
                 pendingConcealCall=call; pendingConcealId=id;
                 launchDeleteConsent(Uri.parse(original));
@@ -757,13 +811,19 @@ public class NyxVaultPlugin extends Plugin {
                     return;
                 }
                 boolean deleted=deleteOriginalSilently(Uri.parse(original));
+                android.util.Log.i(TAG,"runConceal: direct delete result="+deleted+" id="+id);
                 if(deleted){markOriginalRemoved(id); JSObject r=new JSObject();r.put("concealed",true);call.resolve(r);}
                 else {JSObject r=new JSObject();r.put("concealed",false);r.put("reason","delete-failed");call.resolve(r);}
+                concealInFlight=false; pumpConcealQueue();
                 return;
             }
             pendingConcealCall=call; pendingConcealId=id;
             launchDeleteConsent(Uri.parse(original));
-        } catch(Exception e){call.reject("Could not conceal media");}
+        } catch(Exception e){
+            android.util.Log.e(TAG,"runConceal: exception for id="+id, e);
+            call.reject("Could not conceal media: "+e.getMessage());
+            concealInFlight=false; pumpConcealQueue();
+        }
     }
 
     private boolean deleteOriginalSilently(Uri uri) {
@@ -793,8 +853,10 @@ public class NyxVaultPlugin extends Plugin {
     public void handleRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.handleRequestPermissionsResult(requestCode,permissions,grantResults);
         if(requestCode==913 && pendingConcealCall!=null){
-            if(grantResults.length>0 && grantResults[0]==android.content.pm.PackageManager.PERMISSION_GRANTED){
-                try { org.json.JSONObject meta=findMeta(pendingConcealId); String original=meta==null?"":meta.optString("original_uri",""); boolean ok=!original.isEmpty() && deleteOriginalSilently(Uri.parse(original)); if(ok)markOriginalRemoved(pendingConcealId); finishPendingConceal(ok); } catch(Exception e){pendingConcealCall.reject("Could not conceal media");pendingConcealCall=null;}
+            boolean granted=grantResults.length>0 && grantResults[0]==android.content.pm.PackageManager.PERMISSION_GRANTED;
+            android.util.Log.i(TAG,"handleRequestPermissionsResult: id="+pendingConcealId+" granted="+granted);
+            if(granted){
+                try { org.json.JSONObject meta=findMeta(pendingConcealId); String original=meta==null?"":meta.optString("original_uri",""); boolean ok=!original.isEmpty() && deleteOriginalSilently(Uri.parse(original)); android.util.Log.i(TAG,"handleRequestPermissionsResult: delete result="+ok); if(ok)markOriginalRemoved(pendingConcealId); finishPendingConceal(ok); } catch(Exception e){android.util.Log.e(TAG,"handleRequestPermissionsResult: exception",e); pendingConcealCall.reject("Could not conceal media: "+e.getMessage());pendingConcealCall=null; concealInFlight=false; pumpConcealQueue();}
             } else finishPendingConceal(false);
         }
     }
@@ -805,20 +867,28 @@ public class NyxVaultPlugin extends Plugin {
         if(requestCode==DELETE_REQUEST_CODE && pendingConcealCall!=null){
             boolean approved=resultCode==android.app.Activity.RESULT_OK;
             String id=pendingConcealId;
+            android.util.Log.i(TAG,"handleOnActivityResult: id="+id+" resultCode="+resultCode+" approved="+approved);
             try {
                 if(approved){
                     org.json.JSONObject meta=findMeta(id);
                     String original=meta==null?"":meta.optString("original_uri","");
                     boolean gone=!original.isEmpty() && !existsInMediaStore(Uri.parse(original));
+                    android.util.Log.i(TAG,"handleOnActivityResult: gone="+gone+" original="+original);
                     if(gone) markOriginalRemoved(id);
                     finishPendingConceal(gone);
-                } else finishPendingConceal(false);
-            } catch(Exception e){ pendingConcealCall.reject("Could not finish conceal operation"); pendingConcealCall=null; }
+                } else {
+                    android.util.Log.i(TAG,"handleOnActivityResult: user declined delete consent for id="+id);
+                    finishPendingConceal(false);
+                }
+            } catch(Exception e){ android.util.Log.e(TAG,"handleOnActivityResult: exception",e); pendingConcealCall.reject("Could not finish conceal operation: "+e.getMessage()); pendingConcealCall=null; concealInFlight=false; pumpConcealQueue(); }
         }
     }
 
     private void finishPendingConceal(boolean concealed){
-        if(pendingConcealCall==null)return; JSObject r=new JSObject();r.put("concealed",concealed); if(!concealed)r.put("reason","permission-denied"); pendingConcealCall.resolve(r); pendingConcealCall=null; pendingConcealId="";
+        if(pendingConcealCall==null)return;
+        android.util.Log.i(TAG,"finishPendingConceal: id="+pendingConcealId+" concealed="+concealed);
+        JSObject r=new JSObject();r.put("concealed",concealed); if(!concealed)r.put("reason","permission-denied"); pendingConcealCall.resolve(r); pendingConcealCall=null; pendingConcealId="";
+        concealInFlight=false; pumpConcealQueue();
     }
 
     private synchronized void markOriginalRemoved(String id) throws Exception {

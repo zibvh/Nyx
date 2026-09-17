@@ -168,7 +168,42 @@ $("#lockBtn").onclick=async()=>{pendingSecret="";activeMediaId="";setSelectMode(
 $("#importBtn").onclick=()=>show("#pickerView");
 async function syncUploads(){try{if(Native) await Native.syncUploads()}catch(e){}}
 async function ensureConcealPermission(){try{const st=await Native.getConcealStrategy();if(st?.api>=31&&st?.strategy===2&&!st?.manageMedia){show("#concealPermissionView");try{await Native.requestManageMedia()}catch(_){ }return true}}catch(_){ }return false}
-async function choosePicker(source){try{const r=await Native.pickMedia({source});if(r?.imported){const ids=Array.isArray(r.ids)?r.ids:[];if(ids.length)await ensureConcealPermission();for(const id of ids){try{await Native.concealMedia({id})}catch(_){}}await syncUploads();await renderVault();setTimeout(()=>show("#vaultView"),200)}}catch(e){}}
+async function choosePicker(source){
+  try{
+    const r=await Native.pickMedia({source});
+    if(r?.imported){
+      const ids=Array.isArray(r.ids)?r.ids:[];
+      console.log("[NYX] imported ids:",ids);
+      if(ids.length)await ensureConcealPermission();
+      let concealedCount=0, failedCount=0;
+      for(const id of ids){
+        try{
+          const res=await Native.concealMedia({id});
+          console.log("[NYX] concealMedia result for",id,":",res);
+          if(res?.concealed) concealedCount++;
+          else { failedCount++; console.warn("[NYX] conceal did not complete for",id,"reason:",res?.reason); }
+        }catch(e){
+          failedCount++;
+          console.error("[NYX] concealMedia threw for",id,":",e);
+        }
+      }
+      if(failedCount>0){
+        // Surface failures instead of hiding them. If nothing else exists in the UI,
+        // this at least logs to console (visible via chrome://inspect or adb logcat)
+        // and shows a basic alert so it's not silently swallowed anymore.
+        const msg=`NYX: ${concealedCount} of ${ids.length} originals concealed. ${failedCount} still visible in your gallery.`;
+        console.warn("[NYX]",msg);
+        try{ if(typeof window.alert==="function") window.alert(msg); }catch(_){}
+      }
+      await syncUploads();
+      await renderVault();
+      setTimeout(()=>show("#vaultView"),200)
+    }
+  }catch(e){
+    console.error("[NYX] choosePicker failed:",e);
+    try{ if(typeof window.alert==="function") window.alert("NYX import failed: "+(e?.message||e)); }catch(_){}
+  }
+}
 $("#pickPhotos").onclick=()=>choosePicker("photos");$("#pickFiles").onclick=()=>choosePicker("files");$("#grantMediaManage").onclick=async()=>{try{const r=await Native.requestManageMedia();if(r?.granted){$("#concealPermissionMsg").textContent="Access granted.";show("#vaultView")}}catch(_){}};$("#skipMediaManage").onclick=()=>show("#vaultView");
 let pressTimer=null,pressFiredLongPress=false,pressStartX=0,pressStartY=0;
 const LONGPRESS_MOVE_TOLERANCE=10; // px of finger drift still counted as a "hold", not a drag

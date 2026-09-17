@@ -407,10 +407,14 @@
       const st = await Native.getConcealStrategy();
       if (st?.api >= 31 && st?.strategy === 2 && !st?.manageMedia) {
         show("#concealPermissionView");
-        try { await Native.requestManageMedia(); } catch (_) {}
+        try {
+          await Native.requestManageMedia();
+        } catch (_) {
+        }
         return true;
       }
-    } catch (_) {}
+    } catch (_) {
+    }
     return false;
   }
   async function choosePicker(source) {
@@ -418,21 +422,55 @@
       const r = await Native.pickMedia({ source });
       if (r?.imported) {
         const ids = Array.isArray(r.ids) ? r.ids : [];
+        console.log("[NYX] imported ids:", ids);
         if (ids.length) await ensureConcealPermission();
+        let concealedCount = 0, failedCount = 0;
         for (const id of ids) {
-          try { await Native.concealMedia({ id }); } catch (_) {}
+          try {
+            const res = await Native.concealMedia({ id });
+            console.log("[NYX] concealMedia result for", id, ":", res);
+            if (res?.concealed) concealedCount++;
+            else {
+              failedCount++;
+              console.warn("[NYX] conceal did not complete for", id, "reason:", res?.reason);
+            }
+          } catch (e) {
+            failedCount++;
+            console.error("[NYX] concealMedia threw for", id, ":", e);
+          }
+        }
+        if (failedCount > 0) {
+          const msg = `NYX: ${concealedCount} of ${ids.length} originals concealed. ${failedCount} still visible in your gallery.`;
+          console.warn("[NYX]", msg);
+          try {
+            if (typeof window.alert === "function") window.alert(msg);
+          } catch (_) {
+          }
         }
         await syncUploads();
         await renderVault();
         setTimeout(() => show("#vaultView"), 200);
       }
-    } catch (e) {}
+    } catch (e) {
+      console.error("[NYX] choosePicker failed:", e);
+      try {
+        if (typeof window.alert === "function") window.alert("NYX import failed: " + (e?.message || e));
+      } catch (_) {
+      }
+    }
   }
   $("#pickPhotos").onclick = () => choosePicker("photos");
   $("#pickFiles").onclick = () => choosePicker("files");
-  $("#grantMediaManage").onclick = async () => { try { const r = await Native.requestManageMedia(); if (r?.granted) { document.querySelector("#concealPermissionMsg").textContent="Access granted."; show("#vaultView"); } } catch (_) {} };
-  $("#skipMediaManage").onclick = () => show("#vaultView");
-  $("#grantMediaManage").onclick = async () => { try { const r = await Native.requestManageMedia(); if (r?.granted) show("#vaultView"); } catch (_) {} };
+  $("#grantMediaManage").onclick = async () => {
+    try {
+      const r = await Native.requestManageMedia();
+      if (r?.granted) {
+        $("#concealPermissionMsg").textContent = "Access granted.";
+        show("#vaultView");
+      }
+    } catch (_) {
+    }
+  };
   $("#skipMediaManage").onclick = () => show("#vaultView");
   var pressTimer = null;
   var pressFiredLongPress = false;
