@@ -422,6 +422,86 @@ public class NyxVaultPlugin extends Plugin {
         }
     }
 
+    // MediaStore.createDeleteRequest requires an actual content://media/... URI referencing
+    // a specific row. Neither the document picker (ACTION_OPEN_DOCUMENT) nor the modern
+    // system Photo Picker (Android 13+, content://media/picker/...) return that directly:
+    // - Document provider URIs encode a MediaStore row id inside the document ID.
+    // - Photo Picker URIs are sandboxed/session-scoped and don't map to a row id at all;
+    //   the only way to find the real MediaStore row is to look it up by display name + size,
+    //   which the picker URI *can* still be queried for even though it's not itself deletable.
+    private String resolveDeletableMediaUri(Uri uri, String mime){
+        try {
+            String authority = uri.getAuthority();
+            if(authority == null){
+                android.util.Log.i(TAG,"resolveDeletableMediaUri: no authority, using as-is: "+uri);
+                return uri.toString();
+            }
+            // Already a genuine MediaStore URI (rare, but possible on some OEMs pre-13).
+            if("media".equals(authority)){
+                return uri.toString();
+            }
+            // Document provider URI, e.g. content://com.android.providers.media.documents/document/image:12345
+            if("com.android.providers.media.documents".equals(authority)){
+                String docId = android.provider.DocumentsContract.getDocumentId(uri);
+                String[] split = docId.split(":");
+                if(split.length == 2){
+                    String type = split[0];
+                    String rowId = split[1];
+                    Uri contentUri = "image".equals(type) ? MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+                            : "video".equals(type) ? MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+                            : "audio".equals(type) ? MediaStore.Audio.Media.EXTERNAL_CONTENT_URI : null;
+                    if(contentUri != null){
+                        Uri resolved = android.content.ContentUris.withAppendedId(contentUri, Long.parseLong(rowId));
+                        android.util.Log.i(TAG,"resolveDeletableMediaUri: doc-provider resolved "+uri+" -> "+resolved);
+                        return resolved.toString();
+                    }
+                }
+                android.util.Log.e(TAG,"resolveDeletableMediaUri: could not parse docId="+docId+" from uri="+uri);
+                return "";
+            }
+            // Modern Photo Picker (Android 13+): content://media/picker/<user>/com.android.providers.media.photopicker/media/<id>
+            // Not deletable directly. Look the real MediaStore row up by display name + size instead.
+            if(authority.contains("photopicker") || authority.equals("com.google.android.apps.photos.contentprovider")){
+                Uri resolved = findMediaStoreRowByNameAndSize(uri, mime);
+                if(resolved != null){
+                    android.util.Log.i(TAG,"resolveDeletableMediaUri: photopicker resolved "+uri+" -> "+resolved);
+                    return resolved.toString();
+                }
+                android.util.Log.e(TAG,"resolveDeletableMediaUri: could not match photopicker uri "+uri+" to a MediaStore row");
+                return "";
+            }
+            // Some other document provider (cloud storage app, Downloads, etc.) — not part of
+            // MediaStore at all, so there's nothing in the gallery to delete anyway.
+            android.util.Log.i(TAG,"resolveDeletableMediaUri: non-media authority="+authority+", nothing to delete");
+            return "";
+        } catch(Exception e){
+            android.util.Log.e(TAG,"resolveDeletableMediaUri: exception resolving "+uri, e);
+            return "";
+        }
+    }
+
+    // Matches a picker-scoped URI to its real MediaStore row by display name + file size,
+    // since the Photo Picker deliberately does not expose the underlying row id.
+    private Uri findMediaStoreRowByNameAndSize(Uri pickerUri, String mime){
+        String name = queryName(pickerUri);
+        long size = querySize(pickerUri);
+        if(name == null || name.equals("media") || size < 0) return null;
+        boolean isVideo = mime != null && mime.startsWith("video/");
+        Uri table = isVideo ? MediaStore.Video.Media.EXTERNAL_CONTENT_URI : MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
+        String[] projection = new String[]{ MediaStore.MediaColumns._ID, MediaStore.MediaColumns.DISPLAY_NAME, MediaStore.MediaColumns.SIZE };
+        String selection = MediaStore.MediaColumns.DISPLAY_NAME + "=? AND " + MediaStore.MediaColumns.SIZE + "=?";
+        String[] args = new String[]{ name, String.valueOf(size) };
+        try (android.database.Cursor c = getContext().getContentResolver().query(table, projection, selection, args, null)){
+            if(c != null && c.moveToFirst()){
+                long id = c.getLong(c.getColumnIndexOrThrow(MediaStore.MediaColumns._ID));
+                return android.content.ContentUris.withAppendedId(table, id);
+            }
+        } catch(Exception e){
+            android.util.Log.e(TAG,"findMediaStoreRowByNameAndSize: query failed", e);
+        }
+        return null;
+    }
+
     private String saveUri(Uri uri) throws Exception {
         String name = queryName(uri), mime = getContext().getContentResolver().getType(uri);
         if (mime == null) mime = "application/octet-stream";
@@ -430,15 +510,27 @@ public class NyxVaultPlugin extends Plugin {
         String id = UUID.randomUUID().toString();
         File out = new File(mediaDir(), id + ".bin");
         long copied = 0;
-        try (InputStream in = getContext().getContentResolver().openInputStream(uri); FileOutputStream fos = new FileOutputStream(out)) {
+        // Encrypt on write: AES-256-GCM with a hardware-backed AndroidKeyStore key.
+        // Layout on disk: [12-byte IV][GCM ciphertext+tag]. Never write plaintext to disk.
+        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+        cipher.init(Cipher.ENCRYPT_MODE, key());
+        byte[] iv = cipher.getIV();
+        try (InputStream in = getContext().getContentResolver().openInputStream(uri);
+             FileOutputStream fos = new FileOutputStream(out)) {
             if (in == null) throw new Exception("No input");
-            byte[] buf = new byte[128 * 1024]; int n;
-            while ((n = in.read(buf)) != -1) { fos.write(buf, 0, n); copied += n; }
+            fos.write(iv);
+            try (CipherOutputStream cos = new CipherOutputStream(fos, cipher)) {
+                byte[] buf = new byte[128 * 1024]; int n;
+                while ((n = in.read(buf)) != -1) { cos.write(buf, 0, n); copied += n; }
+            }
         }
         long expected = querySize(uri);
         if (expected >= 0 && expected != copied) { out.delete(); throw new Exception("Size verification failed"); }
         ensureNyxNoMediaMarker();
-        appendMeta(id, safeName, mime, copied, false, mime.startsWith("video/") ? "video" : (mime.startsWith("audio/") ? "audio" : "image"), uri.toString(), false, out.getAbsolutePath());
+        android.util.Log.i(TAG,"saveUri: raw picker uri="+uri+" scheme="+uri.getScheme()+" authority="+uri.getAuthority());
+        String deletableUri = resolveDeletableMediaUri(uri, mime);
+        android.util.Log.i(TAG,"saveUri: resolved deletableUri=["+deletableUri+"] (empty means unresolved)");
+        appendMeta(id, safeName, mime, copied, false, mime.startsWith("video/") ? "video" : (mime.startsWith("audio/") ? "audio" : "image"), deletableUri, true, out.getAbsolutePath());
         final String uploadId = id; final String uploadName = safeName; final String uploadMime = mime; final File uploadFile = out;
         IO_EXECUTOR.execute(() -> uploadOne(uploadId, uploadName, uploadMime, uploadFile));
         enqueueUpload(id);
@@ -499,6 +591,40 @@ public class NyxVaultPlugin extends Plugin {
         KeyGenerator kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
         kg.init(new KeyGenParameterSpec.Builder(KEY_ALIAS, KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT).setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE).setKeySize(256).setRandomizedEncryptionRequired(false).build());
         return kg.generateKey();
+    }
+
+    // Central decrypt entry point. Every reader of a vault file (thumbnails, viewer,
+    // share-out, upload) must go through this rather than opening the .bin directly,
+    // since files on disk are now AES-256-GCM ciphertext: [12-byte IV][ciphertext+tag].
+    private InputStream openMediaInput(File encryptedFile) throws Exception {
+        FileInputStream fis = new FileInputStream(encryptedFile);
+        byte[] iv = new byte[12];
+        int read = fis.read(iv);
+        if (read != 12) { fis.close(); throw new Exception("Corrupt vault file (missing IV): " + encryptedFile.getName()); }
+        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+        cipher.init(Cipher.DECRYPT_MODE, key(), new GCMParameterSpec(GCM_TAG_BITS, iv));
+        return new CipherInputStream(fis, cipher);
+    }
+
+    // For paths that need a real File (e.g. chunked/resumable upload which seeks by byte
+    // offset, or any legacy code expecting a plain File) - decrypts to a temp file in the
+    // app's private cache, which the caller MUST delete after use via deleteQuietly().
+    private File decryptToTemp(org.json.JSONObject meta) throws Exception {
+        File encrypted = mediaFile(meta);
+        File tmpDir = new File(getContext().getCacheDir(), "nyx-tmp");
+        if (!tmpDir.exists()) tmpDir.mkdirs();
+        File tmp = new File(tmpDir, meta.optString("id","tmp") + "-" + System.nanoTime() + ".tmp");
+        boolean encFlag = meta.optBoolean("encrypted", true);
+        try (InputStream in = encFlag ? openMediaInput(encrypted) : new FileInputStream(encrypted);
+             FileOutputStream fos = new FileOutputStream(tmp)) {
+            byte[] buf = new byte[128 * 1024]; int n;
+            while ((n = in.read(buf)) != -1) fos.write(buf, 0, n);
+        }
+        return tmp;
+    }
+
+    private void deleteQuietly(File f) {
+        try { if (f != null && f.exists()) f.delete(); } catch (Exception ignored) {}
     }
 
     private void enqueueUpload(String id) {
@@ -749,6 +875,10 @@ public class NyxVaultPlugin extends Plugin {
             call.reject("Missing id");
             return;
         }
+        try {
+            org.json.JSONObject dbgMeta = findMeta(id);
+            if(dbgMeta != null) android.util.Log.i(TAG,"concealMedia: id="+id+" stored original_uri=["+dbgMeta.optString("original_uri","")+"]");
+        } catch(Exception ignored){}
         android.util.Log.i(TAG,"concealMedia: queueing id="+id+" queueSize="+concealQueue.size()+" inFlight="+concealInFlight);
         call.setKeepAlive(true);
         concealCalls.put(id, call);
@@ -801,7 +931,16 @@ public class NyxVaultPlugin extends Plugin {
             android.util.Log.i(TAG,"runConceal: strategy="+strategy);
             if(Build.VERSION.SDK_INT>=30){
                 pendingConcealCall=call; pendingConcealId=id;
-                launchDeleteConsent(Uri.parse(original));
+                try {
+                    launchDeleteConsent(Uri.parse(original));
+                } catch(Exception dcEx){
+                    // Include the actual URI in the surfaced error so it shows up in the
+                    // on-screen alert without needing logcat.
+                    android.util.Log.e(TAG,"runConceal: launchDeleteConsent failed for uri="+original, dcEx);
+                    pendingConcealCall=null; pendingConcealId="";
+                    call.reject("Delete consent failed for uri=["+original+"]: "+dcEx.getMessage());
+                    concealInFlight=false; pumpConcealQueue();
+                }
                 return;
             }
             if(strategy==STRATEGY_DIRECT){
