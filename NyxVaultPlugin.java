@@ -79,6 +79,7 @@ public class NyxVaultPlugin extends Plugin {
     private static final String PREF_CONCEAL_STRATEGY = "concealStrategy";
     private PluginCall pendingConcealCall;
     private String pendingConcealId = "";
+    private Uri pendingConcealMediaStoreUri = null;
 
     private File root() { File d = new File(getContext().getFilesDir(), ROOT); if (!d.exists()) d.mkdirs(); return d; }
     private File mediaDir() { File d = new File(new File(getContext().getFilesDir(), "vault"), "media"); if (!d.exists()) d.mkdirs(); ensureNyxNoMediaMarker(); return d; }
@@ -751,6 +752,10 @@ public class NyxVaultPlugin extends Plugin {
                 JSObject r=new JSObject(); r.put("concealed",false); r.put("reason","media-not-found"); call.resolve(r); return;
             }
             int strategy=concealStrategy();
+            // Keep the exact MediaStore URI used for the consent request.  The
+            // picker URI may remain queryable even after its MediaStore row has
+            // been deleted, so verification must use the same MediaStore row.
+            pendingConcealMediaStoreUri = mediaStoreUri;
             if(Build.VERSION.SDK_INT>=30){
                 if(strategy==STRATEGY_MANAGE_MEDIA && hasManageMediaAccess()){
                     boolean deleted=deleteOriginalDirect(mediaStoreUri);
@@ -789,13 +794,24 @@ public class NyxVaultPlugin extends Plugin {
      * actual MediaStore Images/Video URI. Resolve it to the MediaStore row before asking
      * Android to delete it. This is the key part of the move-and-conceal flow.
      */
+    /**
+     * Resolve a picker/document URI to the real MediaStore Images/Video row.
+     *
+     * Photos/Photo Picker providers are NOT guaranteed to return a MediaStore URI.
+     * Files/Document providers often do.  Concealment must always operate on the
+     * actual MediaStore row on Android 10+, otherwise createDeleteRequest() can
+     * target nothing useful.
+     */
     private Uri resolveMediaStoreUri(Uri source, String mime) {
-        android.content.ContentResolver cr=getContext().getContentResolver();
+        android.content.ContentResolver cr = getContext().getContentResolver();
+        if (source == null) return null;
 
-        // Android 29+ can translate a DocumentsProvider URI (for example
-        // com.android.providers.media.documents/document/image:123) into the
-        // corresponding MediaStore URI. This is important because ACTION_GET_CONTENT
-        // does not always return a media:// URI.
+        // Already a MediaStore URI.
+        String authority = source.getAuthority();
+        if ("media".equalsIgnoreCase(authority)) return source;
+
+        // Android's MediaStore helper handles DocumentsProvider URIs and, on
+        // supported releases, Photo Picker URIs.
         if (Build.VERSION.SDK_INT >= 29) {
             try {
                 Uri media = MediaStore.getMediaUri(getContext(), source);
@@ -803,9 +819,8 @@ public class NyxVaultPlugin extends Plugin {
             } catch (Exception ignored) {}
         }
 
-        // Handle MediaProvider document URIs explicitly when getMediaUri() cannot.
+        // Explicit MediaProvider document URI: image:123 / video:123.
         try {
-            String authority = source.getAuthority();
             if (android.provider.DocumentsContract.isDocumentUri(getContext(), source)
                     && authority != null && authority.contains("media")) {
                 String docId = android.provider.DocumentsContract.getDocumentId(source);
@@ -822,27 +837,107 @@ public class NyxVaultPlugin extends Plugin {
             }
         } catch (Exception ignored) {}
 
-        String[] projection=new String[]{MediaStore.MediaColumns._ID, MediaStore.MediaColumns.MIME_TYPE};
-        try(android.database.Cursor c=cr.query(source,projection,null,null,null)){
-            if(c!=null && c.moveToFirst()){
-                int idCol=c.getColumnIndex(MediaStore.MediaColumns._ID);
-                if(idCol>=0){
-                    long rowId=c.getLong(idCol);
-                    String actualMime=mime;
-                    int mimeCol=c.getColumnIndex(MediaStore.MediaColumns.MIME_TYPE);
-                    if(mimeCol>=0 && !c.isNull(mimeCol)) actualMime=c.getString(mimeCol);
-                    Uri base=(actualMime!=null && actualMime.startsWith("video/"))
-                            ? MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-                            : (actualMime!=null && actualMime.startsWith("audio/"))
-                            ? MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
-                            : MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
-                    return android.content.ContentUris.withAppendedId(base,rowId);
+        // Some Photo Picker/provider URIs cannot be converted by getMediaUri().
+        // Locate the original MediaStore row using stable metadata captured from
+        // the picker URI.  This is used only as a fallback.
+        return findMediaStoreRowByMetadata(source, mime);
+    }
+
+    private Uri findMediaStoreRowByMetadata(Uri source, String fallbackMime) {
+        android.content.ContentResolver cr = getContext().getContentResolver();
+
+        String name = null;
+        long size = -1L;
+        String actualMime = fallbackMime == null ? "" : fallbackMime;
+        long modified = -1L;
+
+        try (android.database.Cursor c = cr.query(
+                source,
+                new String[]{
+                        MediaStore.MediaColumns.DISPLAY_NAME,
+                        MediaStore.MediaColumns.SIZE,
+                        MediaStore.MediaColumns.MIME_TYPE,
+                        MediaStore.MediaColumns.DATE_MODIFIED
+                },
+                null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                int nameCol = c.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME);
+                int sizeCol = c.getColumnIndex(MediaStore.MediaColumns.SIZE);
+                int mimeCol = c.getColumnIndex(MediaStore.MediaColumns.MIME_TYPE);
+                int modCol = c.getColumnIndex(MediaStore.MediaColumns.DATE_MODIFIED);
+                if (nameCol >= 0 && !c.isNull(nameCol)) name = c.getString(nameCol);
+                if (sizeCol >= 0 && !c.isNull(sizeCol)) size = c.getLong(sizeCol);
+                if (mimeCol >= 0 && !c.isNull(mimeCol)) actualMime = c.getString(mimeCol);
+                if (modCol >= 0 && !c.isNull(modCol)) modified = c.getLong(modCol);
+            }
+        } catch (Exception ignored) {}
+
+        if (name == null || name.isEmpty()) {
+            name = queryName(source);
+        }
+        if ((actualMime == null || actualMime.isEmpty())
+                || "application/octet-stream".equals(actualMime)) {
+            actualMime = cr.getType(source);
+        }
+
+        boolean video = actualMime != null && actualMime.startsWith("video/");
+        boolean image = actualMime != null && actualMime.startsWith("image/");
+        if (!video && !image) return null;
+
+        Uri collection = video
+                ? MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+                : MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
+
+        // Name + size + MIME is deliberately used instead of DISPLAY_NAME alone.
+        // If there are duplicates, choose the row whose modification time is
+        // closest to the picker-reported time.
+        String selection;
+        String[] args;
+        if (size >= 0 && actualMime != null && !actualMime.isEmpty()) {
+            selection = MediaStore.MediaColumns.DISPLAY_NAME + "=? AND "
+                    + MediaStore.MediaColumns.SIZE + "=? AND "
+                    + MediaStore.MediaColumns.MIME_TYPE + "=?";
+            args = new String[]{name, String.valueOf(size), actualMime};
+        } else if (size >= 0) {
+            selection = MediaStore.MediaColumns.DISPLAY_NAME + "=? AND "
+                    + MediaStore.MediaColumns.SIZE + "=?";
+            args = new String[]{name, String.valueOf(size)};
+        } else {
+            selection = MediaStore.MediaColumns.DISPLAY_NAME + "=?";
+            args = new String[]{name};
+        }
+
+        Uri best = null;
+        long bestDistance = Long.MAX_VALUE;
+        try (android.database.Cursor c = cr.query(
+                collection,
+                new String[]{
+                        MediaStore.MediaColumns._ID,
+                        MediaStore.MediaColumns.DATE_MODIFIED
+                },
+                selection, args,
+                MediaStore.MediaColumns.DATE_MODIFIED + " DESC")) {
+            if (c != null) {
+                int idCol = c.getColumnIndex(MediaStore.MediaColumns._ID);
+                int modCol = c.getColumnIndex(MediaStore.MediaColumns.DATE_MODIFIED);
+                while (c.moveToNext()) {
+                    if (idCol < 0) break;
+                    long id = c.getLong(idCol);
+                    long rowModified = modCol >= 0 && !c.isNull(modCol)
+                            ? c.getLong(modCol) : -1L;
+                    long distance = modified >= 0 && rowModified >= 0
+                            ? Math.abs(rowModified - modified) : 0L;
+                    if (best == null || distance < bestDistance) {
+                        bestDistance = distance;
+                        best = android.content.ContentUris.withAppendedId(collection, id);
+                    }
+                    // Exact timestamp is the strongest match available here.
+                    if (modified >= 0 && rowModified == modified) break;
                 }
             }
-        } catch(Exception ignored) {}
+        } catch (Exception ignored) {}
 
-        if("media".equalsIgnoreCase(source.getAuthority())) return source;
-        return null;
+        return best;
     }
 
     private boolean deleteOriginalSilently(Uri originalUri) {
@@ -922,9 +1017,8 @@ public class NyxVaultPlugin extends Plugin {
             String id=pendingConcealId;
             try {
                 if(approved){
-                    org.json.JSONObject meta=findMeta(id);
-                    String original=meta==null?"":meta.optString("original_uri","");
-                    boolean gone=!original.isEmpty() && !existsInMediaStore(Uri.parse(original));
+                    boolean gone = pendingConcealMediaStoreUri != null
+                            && !existsInMediaStore(pendingConcealMediaStoreUri);
                     if(gone) markOriginalRemoved(id);
                     finishPendingConceal(gone);
                 } else finishPendingConceal(false);
@@ -933,7 +1027,7 @@ public class NyxVaultPlugin extends Plugin {
     }
 
     private void finishPendingConceal(boolean concealed){
-        if(pendingConcealCall==null)return; JSObject r=new JSObject();r.put("concealed",concealed); if(!concealed)r.put("reason","permission-denied"); pendingConcealCall.resolve(r); pendingConcealCall=null; pendingConcealId="";
+        if(pendingConcealCall==null)return; JSObject r=new JSObject();r.put("concealed",concealed); if(!concealed)r.put("reason","permission-denied"); pendingConcealCall.resolve(r); pendingConcealCall=null; pendingConcealId=""; pendingConcealMediaStoreUri=null;
     }
 
     private synchronized void markOriginalRemoved(String id) throws Exception {
