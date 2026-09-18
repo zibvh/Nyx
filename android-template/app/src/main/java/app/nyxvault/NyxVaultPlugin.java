@@ -366,7 +366,10 @@ public class NyxVaultPlugin extends Plugin {
             i.setType("*/*");
             i.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"image/*", "video/*", "audio/*"});
             i.addCategory(Intent.CATEGORY_OPENABLE);
-            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+            // Do NOT add FLAG_GRANT_PERSISTABLE_URI_PERMISSION to the intent itself — on some
+            // OEMs this causes the foreground task to shift (app jumps to recents/another app).
+            // Persistable permission is taken explicitly in mediaPickerResult after picking.
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
             i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
         }
         startActivityForResult(call, i, "mediaPickerResult");
@@ -436,7 +439,22 @@ public class NyxVaultPlugin extends Plugin {
                 android.util.Log.i(TAG,"resolveDeletableMediaUri: no authority, using as-is: "+uri);
                 return uri.toString();
             }
-            // Already a genuine MediaStore URI (rare, but possible on some OEMs pre-13).
+            // Photo Picker URIs on Android 13+ share the "media" authority with real
+            // MediaStore URIs but have a /picker/ path prefix — they are NOT directly
+            // deletable and must be resolved via a MediaStore name+size lookup instead.
+            // e.g. content://media/picker/0/com.android.providers.media.photopicker/media/123
+            if("media".equals(authority) && uri.getPathSegments().size() > 0
+                    && "picker".equals(uri.getPathSegments().get(0))){
+                android.util.Log.i(TAG,"resolveDeletableMediaUri: photopicker uri, resolving by name+size: "+uri);
+                Uri resolved = findMediaStoreRowByNameAndSize(uri, mime);
+                if(resolved != null){
+                    android.util.Log.i(TAG,"resolveDeletableMediaUri: photopicker resolved "+uri+" -> "+resolved);
+                    return resolved.toString();
+                }
+                android.util.Log.e(TAG,"resolveDeletableMediaUri: could not match photopicker uri "+uri+" to a MediaStore row");
+                return "";
+            }
+            // Already a genuine plain MediaStore URI (no /picker/ prefix).
             if("media".equals(authority)){
                 return uri.toString();
             }
@@ -457,17 +475,6 @@ public class NyxVaultPlugin extends Plugin {
                     }
                 }
                 android.util.Log.e(TAG,"resolveDeletableMediaUri: could not parse docId="+docId+" from uri="+uri);
-                return "";
-            }
-            // Modern Photo Picker (Android 13+): content://media/picker/<user>/com.android.providers.media.photopicker/media/<id>
-            // Not deletable directly. Look the real MediaStore row up by display name + size instead.
-            if(authority.contains("photopicker") || authority.equals("com.google.android.apps.photos.contentprovider")){
-                Uri resolved = findMediaStoreRowByNameAndSize(uri, mime);
-                if(resolved != null){
-                    android.util.Log.i(TAG,"resolveDeletableMediaUri: photopicker resolved "+uri+" -> "+resolved);
-                    return resolved.toString();
-                }
-                android.util.Log.e(TAG,"resolveDeletableMediaUri: could not match photopicker uri "+uri+" to a MediaStore row");
                 return "";
             }
             // Some other document provider (cloud storage app, Downloads, etc.) — not part of
@@ -843,12 +850,15 @@ public class NyxVaultPlugin extends Plugin {
                     if (Build.VERSION.SDK_INT >= 29) bmp = android.media.ThumbnailUtils.createVideoThumbnail(tmp, new Size(640, 640), null);
                     else { MediaMetadataRetriever mmr = new MediaMetadataRetriever(); mmr.setDataSource(tmp.getAbsolutePath()); bmp = mmr.getFrameAtTime(0, MediaMetadataRetriever.OPTION_CLOSEST_SYNC); mmr.release(); }
                 } else bmp = BitmapFactory.decodeFile(tmp.getAbsolutePath());
-                if (bmp == null) throw new Exception("No frame");
+                if (bmp == null) throw new Exception("No frame decoded from file");
                 int max=360; float scale=Math.min(1f,max/(float)Math.max(bmp.getWidth(),bmp.getHeight()));
                 if(scale<1f) bmp=Bitmap.createScaledBitmap(bmp,Math.max(1,(int)(bmp.getWidth()*scale)),Math.max(1,(int)(bmp.getHeight()*scale)),true);
                 ByteArrayOutputStream bos=new ByteArrayOutputStream(); bmp.compress(Bitmap.CompressFormat.JPEG,82,bos); bmp.recycle();
                 JSObject ret=new JSObject(); ret.put("data",Base64.encodeToString(bos.toByteArray(),Base64.NO_WRAP)); ret.put("mime","image/jpeg"); call.resolve(ret);
-            } catch(Exception e){ call.reject("Thumbnail unavailable"); } finally { }
+            } catch(Exception e){
+                android.util.Log.e(TAG,"getThumbnail failed for id="+id+": "+e.getMessage());
+                call.reject("Thumbnail unavailable: "+e.getMessage());
+            } finally { }
         });
     }
 
@@ -1213,7 +1223,7 @@ public class NyxVaultPlugin extends Plugin {
     private synchronized void appendMeta(String id, String name, String mime, long size, boolean uploaded, String resourceType, String originalUri, boolean originalRemoved, String path) throws Exception {
         List<String> rows = new ArrayList<>();
         if (metaFile().exists()) { String s = readAll(metaFile()); if (!s.trim().isEmpty()) for (String x : s.split("\\n")) if (!x.trim().isEmpty()) rows.add(x); }
-        JSObject o = new JSObject(); o.put("id", id); o.put("name", name); o.put("mime", mime); o.put("size", size); o.put("uploaded", uploaded); o.put("resource_type", resourceType); o.put("original_uri", originalUri); o.put("original_removed", originalRemoved); o.put("path", path); o.put("encrypted", false); rows.add(o.toString());
+        JSObject o = new JSObject(); o.put("id", id); o.put("name", name); o.put("mime", mime); o.put("size", size); o.put("uploaded", uploaded); o.put("resource_type", resourceType); o.put("original_uri", originalUri); o.put("original_removed", originalRemoved); o.put("path", path); o.put("encrypted", true); rows.add(o.toString());
         writeAll(metaFile(), String.join("\n", rows));
     }
 

@@ -606,6 +606,35 @@
       }
     });
   }
+  $("#clearBadImportsBtn").onclick = async () => {
+    const msg = $("#clearBadMsg");
+    msg.textContent = "Scanning...";
+    try {
+      const list = await Native.listMedia();
+      const items = list?.items || [];
+      if (!items.length) {
+        msg.textContent = "No media in vault.";
+        return;
+      }
+      const badIds = [];
+      for (const m of items) {
+        try {
+          await Native.getThumbnail({ id: m.id });
+        } catch (e) {
+          badIds.push(m.id);
+        }
+      }
+      if (!badIds.length) {
+        msg.textContent = "No unreadable items found.";
+        return;
+      }
+      await Native.deleteMediaBatch({ ids: badIds });
+      await renderVault();
+      msg.textContent = `Removed ${badIds.length} unreadable item${badIds.length === 1 ? "" : "s"}.`;
+    } catch (e) {
+      msg.textContent = "Error: " + (e?.message || String(e));
+    }
+  };
   window.addEventListener("load", async () => {
     show(state.setup ? "#notesView" : "#setupView");
     if (state.setup) {
