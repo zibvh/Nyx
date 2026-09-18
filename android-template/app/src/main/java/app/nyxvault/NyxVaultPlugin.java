@@ -791,6 +791,37 @@ public class NyxVaultPlugin extends Plugin {
      */
     private Uri resolveMediaStoreUri(Uri source, String mime) {
         android.content.ContentResolver cr=getContext().getContentResolver();
+
+        // Android 29+ can translate a DocumentsProvider URI (for example
+        // com.android.providers.media.documents/document/image:123) into the
+        // corresponding MediaStore URI. This is important because ACTION_GET_CONTENT
+        // does not always return a media:// URI.
+        if (Build.VERSION.SDK_INT >= 29) {
+            try {
+                Uri media = MediaStore.getMediaUri(getContext(), source);
+                if (media != null) return media;
+            } catch (Exception ignored) {}
+        }
+
+        // Handle MediaProvider document URIs explicitly when getMediaUri() cannot.
+        try {
+            String authority = source.getAuthority();
+            if (android.provider.DocumentsContract.isDocumentUri(getContext(), source)
+                    && authority != null && authority.contains("media")) {
+                String docId = android.provider.DocumentsContract.getDocumentId(source);
+                int colon = docId.indexOf(':');
+                String kind = colon > 0 ? docId.substring(0, colon) : "";
+                String idPart = colon > 0 ? docId.substring(colon + 1) : docId;
+                long rowId = Long.parseLong(idPart);
+                Uri base = "video".equalsIgnoreCase(kind)
+                        ? MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+                        : "audio".equalsIgnoreCase(kind)
+                        ? MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
+                        : MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
+                return android.content.ContentUris.withAppendedId(base, rowId);
+            }
+        } catch (Exception ignored) {}
+
         String[] projection=new String[]{MediaStore.MediaColumns._ID, MediaStore.MediaColumns.MIME_TYPE};
         try(android.database.Cursor c=cr.query(source,projection,null,null,null)){
             if(c!=null && c.moveToFirst()){
@@ -809,7 +840,7 @@ public class NyxVaultPlugin extends Plugin {
                 }
             }
         } catch(Exception ignored) {}
-        // If it already is a MediaStore URI, keep it as a fallback.
+
         if("media".equalsIgnoreCase(source.getAuthority())) return source;
         return null;
     }
@@ -829,19 +860,29 @@ public class NyxVaultPlugin extends Plugin {
     private boolean deleteOriginalDirect(Uri uri) {
         try {
             int deleted=getContext().getContentResolver().delete(uri,null,null);
-            return deleted>0 || !existsInMediaStore(uri);
-        } catch(Exception e){
-            // On legacy Android, fall back to the filesystem path when available.
-            if(Build.VERSION.SDK_INT<=28){
-                try(android.database.Cursor c=getContext().getContentResolver().query(uri,new String[]{MediaStore.MediaColumns.DATA},null,null,null)){
-                    if(c!=null && c.moveToFirst()){
-                        int col=c.getColumnIndex(MediaStore.MediaColumns.DATA);
-                        if(col>=0 && !c.isNull(col)){ File f=new File(c.getString(col)); if(f.exists() && f.delete()) return true; }
+            if (deleted > 0) return true;
+            if (!existsInMediaStore(uri)) return true;
+        } catch(Exception ignored) {}
+
+        // Android 9 and below still expose a real filesystem path. Use it as the
+        // final legacy fallback; modern Android must go through MediaStore.
+        if(Build.VERSION.SDK_INT<=28){
+            try(android.database.Cursor c=getContext().getContentResolver().query(
+                    uri,new String[]{MediaStore.MediaColumns.DATA},null,null,null)){
+                if(c!=null && c.moveToFirst()){
+                    int col=c.getColumnIndex(MediaStore.MediaColumns.DATA);
+                    if(col>=0 && !c.isNull(col)){
+                        File f=new File(c.getString(col));
+                        if(!f.exists()) return true;
+                        if(f.delete()) {
+                            try { getContext().getContentResolver().delete(uri,null,null); } catch(Exception ignored) {}
+                            return !f.exists();
+                        }
                     }
-                }catch(Exception ignored){}
-            }
-            return !existsInMediaStore(uri);
+                }
+            }catch(Exception ignored){}
         }
+        return !existsInMediaStore(uri);
     }
 
     private boolean existsInMediaStore(Uri uri){
