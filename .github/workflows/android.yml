@@ -40,12 +40,12 @@ jobs:
         run: |
           python3 - <<'PY'
           from pathlib import Path
+          import re, os
           p=Path('android/app/build.gradle')
           s=p.read_text()
-          import re
-          code=int(__import__('os').environ.get('GITHUB_RUN_NUMBER','1'))
-          s=re.sub(r'versionCode\\s+\\d+', f'versionCode {code}', s, count=1)
-          s=re.sub(r'versionName\\s+"[^"]+"', f'versionName "0.9.{code}"', s, count=1)
+          code=int(os.environ.get('GITHUB_RUN_NUMBER','1'))
+          s=re.sub(r'versionCode\s+\d+', f'versionCode {code}', s, count=1)
+          s=re.sub(r'versionName\s+"[^"]+"', f'versionName "0.9.{code}"', s, count=1)
           p.write_text(s)
           PY
 
