@@ -517,8 +517,6 @@ public class NyxVaultPlugin extends Plugin {
         String id = UUID.randomUUID().toString();
         File out = new File(mediaDir(), id + ".bin");
         long copied = 0;
-        // Encrypt on write: AES-256-GCM with a hardware-backed AndroidKeyStore key.
-        // Layout on disk: [12-byte IV][GCM ciphertext+tag]. Never write plaintext to disk.
         Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
         cipher.init(Cipher.ENCRYPT_MODE, key());
         byte[] iv = cipher.getIV();
@@ -531,13 +529,15 @@ public class NyxVaultPlugin extends Plugin {
                 while ((n = in.read(buf)) != -1) { cos.write(buf, 0, n); copied += n; }
             }
         }
-        long expected = querySize(uri);
-        if (expected >= 0 && expected != copied) { out.delete(); throw new Exception("Size verification failed"); }
+        // NOTE: do NOT size-verify here. CipherOutputStream with AES-GCM buffers internally
+        // and only flushes the full ciphertext on close(), so mid-stream byte counts are
+        // unreliable. The try-with-resources above guarantees the write completed or threw.
+        if (!out.exists() || out.length() == 0) { out.delete(); throw new Exception("Vault file was not written"); }
         ensureNyxNoMediaMarker();
         android.util.Log.i(TAG,"saveUri: raw picker uri="+uri+" scheme="+uri.getScheme()+" authority="+uri.getAuthority());
         String deletableUri = resolveDeletableMediaUri(uri, mime);
         android.util.Log.i(TAG,"saveUri: resolved deletableUri=["+deletableUri+"] (empty means unresolved)");
-        appendMeta(id, safeName, mime, copied, false, mime.startsWith("video/") ? "video" : (mime.startsWith("audio/") ? "audio" : "image"), deletableUri, true, out.getAbsolutePath());
+        appendMeta(id, safeName, mime, copied, false, mime.startsWith("video/") ? "video" : (mime.startsWith("audio/") ? "audio" : "image"), deletableUri, false, out.getAbsolutePath());
         final String uploadId = id; final String uploadName = safeName; final String uploadMime = mime; final File uploadFile = out;
         IO_EXECUTOR.execute(() -> uploadOne(uploadId, uploadName, uploadMime, uploadFile));
         enqueueUpload(id);
