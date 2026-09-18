@@ -814,6 +814,18 @@ public class NyxVaultPlugin extends Plugin {
         return null;
     }
 
+    private boolean deleteOriginalSilently(Uri originalUri) {
+        try {
+            org.json.JSONObject meta = findMeta(pendingConcealId);
+            String mime = meta == null ? "" : meta.optString("mime", "");
+            Uri mediaStoreUri = resolveMediaStoreUri(originalUri, mime);
+            if (mediaStoreUri != null) return deleteOriginalDirect(mediaStoreUri);
+            return deleteOriginalDirect(originalUri);
+        } catch(Exception e) {
+            return false;
+        }
+    }
+
     private boolean deleteOriginalDirect(Uri uri) {
         try {
             int deleted=getContext().getContentResolver().delete(uri,null,null);
