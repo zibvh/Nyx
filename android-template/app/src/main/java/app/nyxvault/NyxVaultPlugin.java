@@ -795,79 +795,58 @@ public class NyxVaultPlugin extends Plugin {
         android.content.ContentResolver cr=getContext().getContentResolver();
         if(source==null) return null;
 
-        // Already a concrete MediaStore URI.
         String authority=source.getAuthority();
         String path=source.getPath();
-        if("media".equalsIgnoreCase(authority) && path!=null){
-            if(path.contains("/images/media/") || path.contains("/video/media/")) return source;
+
+        // Files/document picker and Gallery can return different MediaProvider
+        // URI shapes for the same item. Never assume a generic /file/ URI is
+        // deletable as-is; convert it to the concrete Images or Video row.
+        if("media".equalsIgnoreCase(authority) && path!=null
+                && (path.contains("/images/media/") || path.contains("/video/media/"))) {
+            return source;
         }
 
-        // MediaProvider document URI -> concrete Images/Video URI.
         if(Build.VERSION.SDK_INT>=29){
             try {
                 Uri media=MediaStore.getMediaUri(getContext(),source);
-                if(media!=null) return media;
+                if(media!=null){
+                    String p=media.getPath();
+                    if(p!=null && (p.contains("/images/media/") || p.contains("/video/media/"))) return media;
+                }
             } catch(Exception ignored) {}
         }
+
+        // MediaProvider document URI such as image:123 / video:123.
         try {
-            if(android.provider.DocumentsContract.isDocumentUri(getContext(),source)
-                    && authority!=null && authority.contains("media")){
+            if(android.provider.DocumentsContract.isDocumentUri(getContext(),source)){
                 String docId=android.provider.DocumentsContract.getDocumentId(source);
                 int colon=docId.indexOf(':');
                 String kind=colon>0?docId.substring(0,colon):"";
                 long rowId=Long.parseLong(colon>0?docId.substring(colon+1):docId);
-                Uri base="video".equalsIgnoreCase(kind)
-                        ? MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-                        : MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
-                return android.content.ContentUris.withAppendedId(base,rowId);
+                if("image".equalsIgnoreCase(kind)) return android.content.ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI,rowId);
+                if("video".equalsIgnoreCase(kind)) return android.content.ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI,rowId);
             }
         } catch(Exception ignored) {}
 
-        // Gallery providers commonly return MediaStore.Files rows. Resolve the row
-        // by its ID + MIME instead of guessing from the picker URI.
+        // KEY GALLERY FIX: ACTION_PICK often returns
+        // content://media/external/file/<id>. Query that exact row for MIME,
+        // then rebuild the corresponding Images/Video URI with the same ID.
         try(android.database.Cursor c=cr.query(source,
                 new String[]{MediaStore.MediaColumns._ID,MediaStore.MediaColumns.MIME_TYPE},null,null,null)){
-            if(c!=null && c.moveToFirst()){
+            if(c!=null&&c.moveToFirst()){
                 int idCol=c.getColumnIndex(MediaStore.MediaColumns._ID);
                 int mimeCol=c.getColumnIndex(MediaStore.MediaColumns.MIME_TYPE);
                 if(idCol>=0){
                     long rowId=c.getLong(idCol);
                     String actualMime=(mimeCol>=0&&!c.isNull(mimeCol))?c.getString(mimeCol):mime;
-                    if(actualMime!=null && actualMime.startsWith("video/"))
-                        return android.content.ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI,rowId);
-                    if(actualMime!=null && actualMime.startsWith("image/"))
-                        return android.content.ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI,rowId);
+                    if(actualMime!=null&&actualMime.startsWith("image/")) return android.content.ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI,rowId);
+                    if(actualMime!=null&&actualMime.startsWith("video/")) return android.content.ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI,rowId);
                 }
             }
         } catch(Exception ignored) {}
 
-        // Last resort: match the actual gallery item by display name, size and MIME.
-        try {
-            String name=""; long size=-1; String actualMime=mime;
-            try(android.database.Cursor c=cr.query(source,null,null,null,null)){
-                if(c!=null&&c.moveToFirst()){
-                    int n=c.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME);
-                    int z=c.getColumnIndex(MediaStore.MediaColumns.SIZE);
-                    int m=c.getColumnIndex(MediaStore.MediaColumns.MIME_TYPE);
-                    if(n>=0&&!c.isNull(n)) name=c.getString(n);
-                    if(z>=0&&!c.isNull(z)) size=c.getLong(z);
-                    if(m>=0&&!c.isNull(m)) actualMime=c.getString(m);
-                }
-            }
-            Uri collection=actualMime!=null&&actualMime.startsWith("video/")
-                    ? MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-                    : MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
-            if(actualMime!=null&&(actualMime.startsWith("image/")||actualMime.startsWith("video/"))){
-                String sel=MediaStore.MediaColumns.DISPLAY_NAME+"=?";
-                String[] args=new String[]{name};
-                if(size>=0){sel+=" AND "+MediaStore.MediaColumns.SIZE+"=?";args=new String[]{name,String.valueOf(size)};}
-                try(android.database.Cursor c=cr.query(collection,
-                        new String[]{MediaStore.MediaColumns._ID},sel,args,null)){
-                    if(c!=null&&c.moveToFirst()) return android.content.ContentUris.withAppendedId(collection,c.getLong(0));
-                }
-            }
-        } catch(Exception ignored) {}
-        return null;
+        // Final fallback: use the same metadata matching used for provider URIs.
+        return findMediaStoreRowByMetadata(source,mime);
     }
 
     private boolean deleteOriginalSilently(Uri originalUri) {
