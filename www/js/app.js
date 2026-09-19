@@ -428,7 +428,7 @@
       }
     } catch (e) {}
   }
-  $("#pickPhotos").onclick = () => choosePicker("photos");
+  $("#pickGallery").onclick = () => choosePicker("gallery");
   $("#pickFiles").onclick = () => choosePicker("files");
   $("#grantMediaManage").onclick = async () => { try { const r = await Native.requestManageMedia(); if (r?.granted) { document.querySelector("#concealPermissionMsg").textContent="Access granted."; show("#vaultView"); } } catch (_) {} };
   $("#skipMediaManage").onclick = () => show("#vaultView");

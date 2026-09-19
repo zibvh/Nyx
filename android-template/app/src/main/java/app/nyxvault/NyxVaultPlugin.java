@@ -343,17 +343,16 @@ public class NyxVaultPlugin extends Plugin {
         String source = call.getString("source", "files");
         Intent i;
 
-        if ("photos".equals(source)) {
-            // Use the same document-provider path as Files. Photo Picker / GET_CONTENT
-            // can return a read-only picker URI, while ACTION_OPEN_DOCUMENT gives NYX
-            // a persistable read/write document grant that can be used for concealment.
-            i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
-            i.setType("*/*");
+        if ("gallery".equals(source) || "photos".equals(source)) {
+            // Gallery path: ask a gallery/media provider to pick directly from
+            // MediaStore, instead of routing the user through the Files UI.
+            // The returned URI is a MediaStore-style media URI when the gallery
+            // supports ACTION_PICK, which keeps the concealment path aligned with
+            // the actual photo/video row.
+            i = new Intent(Intent.ACTION_PICK);
+            i.setDataAndType(MediaStore.Files.getContentUri("external"), "*/*");
             i.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"image/*", "video/*"});
-            i.addCategory(Intent.CATEGORY_OPENABLE);
-            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
-                    | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
-                    | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+            i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
             i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
         } else {
             // Android Files/document picker. Multiple image/video/audio files are supported.
