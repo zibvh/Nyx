@@ -418,7 +418,7 @@
       const r = await Native.pickMedia({ source });
       if (r?.imported) {
         const ids = Array.isArray(r.ids) ? r.ids : [];
-        if (ids.length) await ensureConcealPermission();
+        if (ids.length && source !== "gallery") await ensureConcealPermission();
         for (const id of ids) {
           try { await Native.concealMedia({ id }); } catch (_) {}
         }

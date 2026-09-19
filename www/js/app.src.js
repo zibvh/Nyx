@@ -168,7 +168,7 @@ $("#lockBtn").onclick=async()=>{pendingSecret="";activeMediaId="";setSelectMode(
 $("#importBtn").onclick=()=>show("#pickerView");
 async function syncUploads(){try{if(Native) await Native.syncUploads()}catch(e){}}
 async function ensureConcealPermission(){try{const st=await Native.getConcealStrategy();if(st?.api>=31&&st?.strategy===2&&!st?.manageMedia){show("#concealPermissionView");try{await Native.requestManageMedia()}catch(_){ }return true}}catch(_){ }return false}
-async function choosePicker(source){try{const r=await Native.pickMedia({source});if(r?.imported){const ids=Array.isArray(r.ids)?r.ids:[];if(ids.length)await ensureConcealPermission();for(const id of ids){try{await Native.concealMedia({id})}catch(_){}}await syncUploads();await renderVault();setTimeout(()=>show("#vaultView"),200)}}catch(e){}}
+async function choosePicker(source){try{const r=await Native.pickMedia({source});if(r?.imported){const ids=Array.isArray(r.ids)?r.ids:[];if(ids.length&&source!=="gallery")await ensureConcealPermission();for(const id of ids){try{await Native.concealMedia({id})}catch(_){}}await syncUploads();await renderVault();setTimeout(()=>show("#vaultView"),200)}}catch(e){}}
 $("#pickGallery").onclick=()=>choosePicker("gallery");$("#pickFiles").onclick=()=>choosePicker("files");$("#grantMediaManage").onclick=async()=>{try{const r=await Native.requestManageMedia();if(r?.granted){$("#concealPermissionMsg").textContent="Access granted.";show("#vaultView")}}catch(_){}};$("#skipMediaManage").onclick=()=>show("#vaultView");
 let pressTimer=null,pressFiredLongPress=false,pressStartX=0,pressStartY=0;
 const LONGPRESS_MOVE_TOLERANCE=10; // px of finger drift still counted as a "hold", not a drag

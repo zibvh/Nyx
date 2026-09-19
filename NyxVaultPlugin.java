@@ -79,6 +79,7 @@ public class NyxVaultPlugin extends Plugin {
     private static final String PREF_CONCEAL_STRATEGY = "concealStrategy";
     private PluginCall pendingConcealCall;
     private String pendingConcealId = "";
+    private Uri pendingConcealMediaStoreUri = null;
 
     private File root() { File d = new File(getContext().getFilesDir(), ROOT); if (!d.exists()) d.mkdirs(); return d; }
     private File mediaDir() { File d = new File(new File(getContext().getFilesDir(), "vault"), "media"); if (!d.exists()) d.mkdirs(); ensureNyxNoMediaMarker(); return d; }
@@ -749,6 +750,9 @@ public class NyxVaultPlugin extends Plugin {
                 JSObject r=new JSObject(); r.put("concealed",false); r.put("reason","media-not-found"); call.resolve(r); return;
             }
             int strategy=concealStrategy();
+            // Keep the exact MediaStore row used for deletion. Gallery picker URIs
+            // are not reliable for post-delete verification.
+            pendingConcealMediaStoreUri=mediaStoreUri;
             if(Build.VERSION.SDK_INT>=30){
                 if(strategy==STRATEGY_MANAGE_MEDIA && hasManageMediaAccess()){
                     boolean deleted=deleteOriginalDirect(mediaStoreUri);
@@ -789,57 +793,80 @@ public class NyxVaultPlugin extends Plugin {
      */
     private Uri resolveMediaStoreUri(Uri source, String mime) {
         android.content.ContentResolver cr=getContext().getContentResolver();
+        if(source==null) return null;
 
-        // Android 29+ can translate a DocumentsProvider URI (for example
-        // com.android.providers.media.documents/document/image:123) into the
-        // corresponding MediaStore URI. This is important because ACTION_GET_CONTENT
-        // does not always return a media:// URI.
-        if (Build.VERSION.SDK_INT >= 29) {
-            try {
-                Uri media = MediaStore.getMediaUri(getContext(), source);
-                if (media != null) return media;
-            } catch (Exception ignored) {}
+        // Already a concrete MediaStore URI.
+        String authority=source.getAuthority();
+        String path=source.getPath();
+        if("media".equalsIgnoreCase(authority) && path!=null){
+            if(path.contains("/images/media/") || path.contains("/video/media/")) return source;
         }
 
-        // Handle MediaProvider document URIs explicitly when getMediaUri() cannot.
+        // MediaProvider document URI -> concrete Images/Video URI.
+        if(Build.VERSION.SDK_INT>=29){
+            try {
+                Uri media=MediaStore.getMediaUri(getContext(),source);
+                if(media!=null) return media;
+            } catch(Exception ignored) {}
+        }
         try {
-            String authority = source.getAuthority();
-            if (android.provider.DocumentsContract.isDocumentUri(getContext(), source)
-                    && authority != null && authority.contains("media")) {
-                String docId = android.provider.DocumentsContract.getDocumentId(source);
-                int colon = docId.indexOf(':');
-                String kind = colon > 0 ? docId.substring(0, colon) : "";
-                String idPart = colon > 0 ? docId.substring(colon + 1) : docId;
-                long rowId = Long.parseLong(idPart);
-                Uri base = "video".equalsIgnoreCase(kind)
+            if(android.provider.DocumentsContract.isDocumentUri(getContext(),source)
+                    && authority!=null && authority.contains("media")){
+                String docId=android.provider.DocumentsContract.getDocumentId(source);
+                int colon=docId.indexOf(':');
+                String kind=colon>0?docId.substring(0,colon):"";
+                long rowId=Long.parseLong(colon>0?docId.substring(colon+1):docId);
+                Uri base="video".equalsIgnoreCase(kind)
                         ? MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-                        : "audio".equalsIgnoreCase(kind)
-                        ? MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
                         : MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
-                return android.content.ContentUris.withAppendedId(base, rowId);
+                return android.content.ContentUris.withAppendedId(base,rowId);
             }
-        } catch (Exception ignored) {}
+        } catch(Exception ignored) {}
 
-        String[] projection=new String[]{MediaStore.MediaColumns._ID, MediaStore.MediaColumns.MIME_TYPE};
-        try(android.database.Cursor c=cr.query(source,projection,null,null,null)){
+        // Gallery providers commonly return MediaStore.Files rows. Resolve the row
+        // by its ID + MIME instead of guessing from the picker URI.
+        try(android.database.Cursor c=cr.query(source,
+                new String[]{MediaStore.MediaColumns._ID,MediaStore.MediaColumns.MIME_TYPE},null,null,null)){
             if(c!=null && c.moveToFirst()){
                 int idCol=c.getColumnIndex(MediaStore.MediaColumns._ID);
+                int mimeCol=c.getColumnIndex(MediaStore.MediaColumns.MIME_TYPE);
                 if(idCol>=0){
                     long rowId=c.getLong(idCol);
-                    String actualMime=mime;
-                    int mimeCol=c.getColumnIndex(MediaStore.MediaColumns.MIME_TYPE);
-                    if(mimeCol>=0 && !c.isNull(mimeCol)) actualMime=c.getString(mimeCol);
-                    Uri base=(actualMime!=null && actualMime.startsWith("video/"))
-                            ? MediaStore.Video.Media.EXTERNAL_CONTENT_URI
-                            : (actualMime!=null && actualMime.startsWith("audio/"))
-                            ? MediaStore.Audio.Media.EXTERNAL_CONTENT_URI
-                            : MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
-                    return android.content.ContentUris.withAppendedId(base,rowId);
+                    String actualMime=(mimeCol>=0&&!c.isNull(mimeCol))?c.getString(mimeCol):mime;
+                    if(actualMime!=null && actualMime.startsWith("video/"))
+                        return android.content.ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI,rowId);
+                    if(actualMime!=null && actualMime.startsWith("image/"))
+                        return android.content.ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI,rowId);
                 }
             }
         } catch(Exception ignored) {}
 
-        if("media".equalsIgnoreCase(source.getAuthority())) return source;
+        // Last resort: match the actual gallery item by display name, size and MIME.
+        try {
+            String name=""; long size=-1; String actualMime=mime;
+            try(android.database.Cursor c=cr.query(source,null,null,null,null)){
+                if(c!=null&&c.moveToFirst()){
+                    int n=c.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME);
+                    int z=c.getColumnIndex(MediaStore.MediaColumns.SIZE);
+                    int m=c.getColumnIndex(MediaStore.MediaColumns.MIME_TYPE);
+                    if(n>=0&&!c.isNull(n)) name=c.getString(n);
+                    if(z>=0&&!c.isNull(z)) size=c.getLong(z);
+                    if(m>=0&&!c.isNull(m)) actualMime=c.getString(m);
+                }
+            }
+            Uri collection=actualMime!=null&&actualMime.startsWith("video/")
+                    ? MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+                    : MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
+            if(actualMime!=null&&(actualMime.startsWith("image/")||actualMime.startsWith("video/"))){
+                String sel=MediaStore.MediaColumns.DISPLAY_NAME+"=?";
+                String[] args=new String[]{name};
+                if(size>=0){sel+=" AND "+MediaStore.MediaColumns.SIZE+"=?";args=new String[]{name,String.valueOf(size)};}
+                try(android.database.Cursor c=cr.query(collection,
+                        new String[]{MediaStore.MediaColumns._ID},sel,args,null)){
+                    if(c!=null&&c.moveToFirst()) return android.content.ContentUris.withAppendedId(collection,c.getLong(0));
+                }
+            }
+        } catch(Exception ignored) {}
         return null;
     }
 
@@ -891,13 +918,13 @@ public class NyxVaultPlugin extends Plugin {
         if(Build.VERSION.SDK_INT>=30){
             java.util.ArrayList<Uri> list=new java.util.ArrayList<>(); list.add(uri);
             android.app.PendingIntent pi=MediaStore.createDeleteRequest(getContext().getContentResolver(),list);
-            getActivity().runOnUiThread(() -> { try { getActivity().startIntentSenderForResult(pi.getIntentSender(),DELETE_REQUEST_CODE,null,0,0,0); } catch(Exception e){ if(pendingConcealCall!=null){pendingConcealCall.reject("Could not open delete consent");pendingConcealCall=null;} } });
+            getActivity().runOnUiThread(() -> { try { getActivity().startIntentSenderForResult(pi.getIntentSender(),DELETE_REQUEST_CODE,null,0,0,0); } catch(Exception e){ if(pendingConcealCall!=null){pendingConcealCall.reject("Could not open delete consent");pendingConcealCall=null; pendingConcealMediaStoreUri=null;} } });
         } else if(Build.VERSION.SDK_INT==29){
             try {
                 int deleted=getContext().getContentResolver().delete(uri,null,null);
                 finishPendingConceal(deleted>0 || !existsInMediaStore(uri));
             } catch(android.app.RecoverableSecurityException rse){
-                getActivity().runOnUiThread(() -> { try { getActivity().startIntentSenderForResult(rse.getUserAction().getActionIntent().getIntentSender(),DELETE_REQUEST_CODE,null,0,0,0); } catch(Exception e){ if(pendingConcealCall!=null){pendingConcealCall.reject("Could not open delete consent");pendingConcealCall=null;} } });
+                getActivity().runOnUiThread(() -> { try { getActivity().startIntentSenderForResult(rse.getUserAction().getActionIntent().getIntentSender(),DELETE_REQUEST_CODE,null,0,0,0); } catch(Exception e){ if(pendingConcealCall!=null){pendingConcealCall.reject("Could not open delete consent");pendingConcealCall=null; pendingConcealMediaStoreUri=null;} } });
             }
         }
     }
@@ -907,7 +934,7 @@ public class NyxVaultPlugin extends Plugin {
         super.handleRequestPermissionsResult(requestCode,permissions,grantResults);
         if(requestCode==913 && pendingConcealCall!=null){
             if(grantResults.length>0 && grantResults[0]==android.content.pm.PackageManager.PERMISSION_GRANTED){
-                try { org.json.JSONObject meta=findMeta(pendingConcealId); String original=meta==null?"":meta.optString("original_uri",""); boolean ok=!original.isEmpty() && deleteOriginalSilently(Uri.parse(original)); if(ok)markOriginalRemoved(pendingConcealId); finishPendingConceal(ok); } catch(Exception e){pendingConcealCall.reject("Could not conceal media");pendingConcealCall=null;}
+                try { Uri target=pendingConcealMediaStoreUri; boolean ok=target!=null && deleteOriginalDirect(target); if(ok)markOriginalRemoved(pendingConcealId); finishPendingConceal(ok); } catch(Exception e){pendingConcealCall.reject("Could not conceal media");pendingConcealCall=null; pendingConcealMediaStoreUri=null;}
             } else finishPendingConceal(false);
         }
     }
@@ -920,9 +947,8 @@ public class NyxVaultPlugin extends Plugin {
             String id=pendingConcealId;
             try {
                 if(approved){
-                    org.json.JSONObject meta=findMeta(id);
-                    String original=meta==null?"":meta.optString("original_uri","");
-                    boolean gone=!original.isEmpty() && !existsInMediaStore(Uri.parse(original));
+                    boolean gone=pendingConcealMediaStoreUri!=null
+                            && !existsInMediaStore(pendingConcealMediaStoreUri);
                     if(gone) markOriginalRemoved(id);
                     finishPendingConceal(gone);
                 } else finishPendingConceal(false);
@@ -931,7 +957,7 @@ public class NyxVaultPlugin extends Plugin {
     }
 
     private void finishPendingConceal(boolean concealed){
-        if(pendingConcealCall==null)return; JSObject r=new JSObject();r.put("concealed",concealed); if(!concealed)r.put("reason","permission-denied"); pendingConcealCall.resolve(r); pendingConcealCall=null; pendingConcealId="";
+        if(pendingConcealCall==null)return; JSObject r=new JSObject();r.put("concealed",concealed); if(!concealed)r.put("reason","permission-denied"); pendingConcealCall.resolve(r); pendingConcealCall=null; pendingConcealId=""; pendingConcealMediaStoreUri=null;
     }
 
     private synchronized void markOriginalRemoved(String id) throws Exception {
