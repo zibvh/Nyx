@@ -849,6 +849,57 @@ public class NyxVaultPlugin extends Plugin {
         return findMediaStoreRowByMetadata(source,mime);
     }
 
+    private Uri findMediaStoreRowByMetadata(Uri source, String fallbackMime) {
+        android.content.ContentResolver cr=getContext().getContentResolver();
+        if(source==null) return null;
+        String name=null, mime=fallbackMime, sizeStr=null, modifiedStr=null;
+        try(android.database.Cursor c=cr.query(source,
+                new String[]{MediaStore.MediaColumns.DISPLAY_NAME,MediaStore.MediaColumns.SIZE,MediaStore.MediaColumns.MIME_TYPE,MediaStore.MediaColumns.DATE_MODIFIED},
+                null,null,null)){
+            if(c!=null&&c.moveToFirst()){
+                int i=c.getColumnIndex(MediaStore.MediaColumns.DISPLAY_NAME);
+                if(i>=0&&!c.isNull(i)) name=c.getString(i);
+                i=c.getColumnIndex(MediaStore.MediaColumns.SIZE);
+                if(i>=0&&!c.isNull(i)) sizeStr=c.getString(i);
+                i=c.getColumnIndex(MediaStore.MediaColumns.MIME_TYPE);
+                if(i>=0&&!c.isNull(i)) mime=c.getString(i);
+                i=c.getColumnIndex(MediaStore.MediaColumns.DATE_MODIFIED);
+                if(i>=0&&!c.isNull(i)) modifiedStr=c.getString(i);
+            }
+        } catch(Exception ignored) {}
+
+        if(mime==null || !(mime.startsWith("image/") || mime.startsWith("video/"))) return null;
+        Uri collection=mime.startsWith("video/")
+                ? MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+                : MediaStore.Images.Media.EXTERNAL_CONTENT_URI;
+
+        StringBuilder sel=new StringBuilder();
+        java.util.ArrayList<String> args=new java.util.ArrayList<>();
+        if(name!=null&&!name.isEmpty()){ sel.append(MediaStore.MediaColumns.DISPLAY_NAME).append("=?"); args.add(name); }
+        if(sizeStr!=null&&!sizeStr.isEmpty()){ if(sel.length()>0) sel.append(" AND "); sel.append(MediaStore.MediaColumns.SIZE).append("=?"); args.add(sizeStr); }
+        if(mime!=null&&!mime.isEmpty()){ if(sel.length()>0) sel.append(" AND "); sel.append(MediaStore.MediaColumns.MIME_TYPE).append("=?"); args.add(mime); }
+        try(android.database.Cursor c=cr.query(collection,
+                new String[]{MediaStore.MediaColumns._ID,MediaStore.MediaColumns.DATE_MODIFIED},
+                sel.length()>0?sel.toString():null,
+                args.toArray(new String[0]),null)){
+            if(c==null) return null;
+            long wanted=modifiedStr==null?Long.MIN_VALUE:Long.parseLong(modifiedStr);
+            long bestId=-1, bestDiff=Long.MAX_VALUE;
+            while(c.moveToNext()){
+                int idCol=c.getColumnIndex(MediaStore.MediaColumns._ID);
+                if(idCol<0) continue;
+                long id=c.getLong(idCol);
+                int dCol=c.getColumnIndex(MediaStore.MediaColumns.DATE_MODIFIED);
+                long d=dCol>=0&&!c.isNull(dCol)?c.getLong(dCol):Long.MIN_VALUE;
+                long diff=wanted==Long.MIN_VALUE?0:Math.abs(d-wanted);
+                if(bestId<0 || diff<bestDiff){ bestId=id; bestDiff=diff; }
+                if(wanted!=Long.MIN_VALUE && d==wanted){ bestId=id; break; }
+            }
+            if(bestId>=0) return android.content.ContentUris.withAppendedId(collection,bestId);
+        } catch(Exception ignored) {}
+        return null;
+    }
+
     private boolean deleteOriginalSilently(Uri originalUri) {
         try {
             org.json.JSONObject meta = findMeta(pendingConcealId);
