@@ -16,6 +16,7 @@ public class NyxUploadWorker extends Worker {
     private static final String B2_KEY_ID = "00334f3ef70d4020000000003";
     private static final String B2_APPLICATION_KEY = "K003DHluvEsxXpIW9lvhB6uTrMYNEKc";
     private static final String B2_BUCKET_NAME = "Nyxoria";
+    private static final String B2_BUCKET_ID = "d3249f436e0fb740ad040012";
     private static final String ROOT = "nyx-media";
     private static final String META = "nyx-media.json";
     public NyxUploadWorker(@NonNull Context context, @NonNull WorkerParameters params) { super(context, params); }
@@ -26,10 +27,10 @@ public class NyxUploadWorker extends Worker {
     }
     private void upload(String id,File file,String mime)throws Exception{
         JSONObject auth=postJson("https://api.backblazeb2.com/b2api/v2/b2_authorize_account",null,basic(B2_KEY_ID,B2_APPLICATION_KEY));
-        String apiUrl=auth.getString("apiUrl"),authToken=auth.getString("authorizationToken"),accountId=auth.getString("accountId");
-        JSONObject lb=postJson(apiUrl+"/b2api/v2/b2_list_buckets",new JSONObject().put("accountId",accountId).put("bucketName",B2_BUCKET_NAME).toString(),"Bearer "+authToken);
-        JSONArray buckets=lb.optJSONArray("buckets");String bucketId=null;if(buckets!=null)for(int i=0;i<buckets.length();i++){JSONObject b=buckets.getJSONObject(i);if(B2_BUCKET_NAME.equals(b.optString("bucketName"))){bucketId=b.optString("bucketId");break;}}
-        if(bucketId==null||bucketId.isEmpty())throw new Exception("B2 bucket not found");
+        String apiUrl=auth.getString("apiUrl"),authToken=auth.getString("authorizationToken");
+        // Use the known bucket ID directly. This avoids requiring the application key
+        // to have listBuckets permission on restricted B2 keys.
+        String bucketId=B2_BUCKET_ID;
         JSONObject up=postJson(apiUrl+"/b2api/v2/b2_get_upload_url",new JSONObject().put("bucketId",bucketId).toString(),"Bearer "+authToken);
         String sha1=sha1(file),fileName="nyx-vault/"+id+".bin"; HttpURLConnection c=(HttpURLConnection)new URL(up.getString("uploadUrl")).openConnection();
         c.setDoOutput(true);c.setRequestMethod("POST");c.setConnectTimeout(30000);c.setReadTimeout(180000);c.setFixedLengthStreamingMode(file.length());
