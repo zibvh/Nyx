@@ -16,7 +16,10 @@ if(window.Capacitor){
 
 }
 const notes=JSON.parse(localStorage.getItem("nyx_notes")||"[]");
+for(const n of notes){if(!n.id)n.id=(crypto.randomUUID?crypto.randomUUID():String(Date.now()+Math.random()));}
+localStorage.setItem("nyx_notes",JSON.stringify(notes));
 const state=JSON.parse(localStorage.getItem("nyx_state")||'{"setup":false,"displayName":"Notes"}');
+let editingNoteId=null;
 let pendingSecret="", activeMediaId="";
 const VAULT_VIEWS=new Set(["#vaultView","#vaultSettingsView","#pickerView"]);
 let vaultLockPending=false;
@@ -44,7 +47,7 @@ const show=id=>{
   lastShownWasVault=nowVault;
 };
 const esc=v=>String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[c]));
-function renderNotes(){$("#notesList").innerHTML=notes.length?notes.map(n=>`<article class="note"><h3>${esc(n.title||"Untitled")}</h3><p>${esc(n.body)}</p><small>${new Date(n.createdAt).toLocaleString()}</small></article>`).join(""):`<p class="muted">No notes yet.</p>`}
+function renderNotes(){$("#notesList").innerHTML=notes.length?notes.map(n=>`<article class="note" data-note-id="${esc(n.id)}"><h3>${esc(n.title||"Untitled")}</h3><p>${esc(n.body)}</p><small>${new Date(n.createdAt).toLocaleString()}${n.updatedAt?` · edited ${new Date(n.updatedAt).toLocaleString()}`:""}</small><div class="note-actions"><button type="button" class="note-action edit" data-action="edit" data-id="${esc(n.id)}">Edit</button><button type="button" class="note-action delete" data-action="delete" data-id="${esc(n.id)}">Delete</button></div></article>`).join(""):`<p class="muted">No notes yet.</p>`}
 const thumbCache={};
 let selectMode=false, selectedIds=new Set();
 function setSelectMode(on){
@@ -82,7 +85,9 @@ async function renderVault(){
 }
 async function loadThumb(m){const key=String(m.id);if(thumbCache[key]){const holder=$("#thumb-"+CSS.escape(key));if(holder)holder.innerHTML=`<img src="${thumbCache[key]}" alt="">`;return}try{const r=await Native.getThumbnail({id:m.id});if(r.data){const uri=`data:${r.mime||"image/jpeg"};base64,${r.data}`;thumbCache[key]=uri;const holder=$("#thumb-"+CSS.escape(key));if(holder)holder.innerHTML=`<img src="${uri}" alt="">`}}catch{}}
 async function unlock(){const pin=$("#pinInput").value.trim();if(!/^\d{6}$/.test(pin)||!pendingSecret){$("#unlockMsg").textContent="Enter your 6-digit PIN.";return}try{const r=await Native.verifyCredential({secret:pendingSecret,pin});if(r.ok){pendingSecret="";$("#pinInput").value="";show("#vaultView");await renderVault()}else{$("#unlockMsg").textContent="Wrong PIN.";$("#pinInput").select()}}catch{$("#unlockMsg").textContent="Could not unlock."}}
-$("#noteForm").onsubmit=async e=>{e.preventDefault();const title=$("#noteTitle").value.trim(),body=$("#noteBody").value.trim();if(!title&&!body)return;if(state.setup&&Native&&title){try{const r=await Native.verifySecret({secret:title});if(r?.ok){e.target.reset();triggerSecret(title);return}}catch{}}notes.unshift({title,body,createdAt:Date.now()});localStorage.setItem("nyx_notes",JSON.stringify(notes));e.target.reset();renderNotes()};
+$("#noteForm").onsubmit=async e=>{e.preventDefault();const title=$("#noteTitle").value.trim(),body=$("#noteBody").value.trim();if(!title&&!body)return;if(editingNoteId){const n=notes.find(x=>x.id===editingNoteId);if(n){n.title=title;n.body=body;n.updatedAt=Date.now();}editingNoteId=null;$("#noteSubmit").textContent="Save";$("#cancelEdit").classList.add("hidden");e.target.reset();localStorage.setItem("nyx_notes",JSON.stringify(notes));renderNotes();return}if(state.setup&&Native&&title){try{const r=await Native.verifySecret({secret:title});if(r?.ok){e.target.reset();triggerSecret(title);return}}catch{}}notes.unshift({id:(crypto.randomUUID?crypto.randomUUID():String(Date.now()+Math.random())),title,body,createdAt:Date.now()});localStorage.setItem("nyx_notes",JSON.stringify(notes));e.target.reset();renderNotes()};
+$("#cancelEdit").onclick=()=>{editingNoteId=null;$("#noteForm").reset();$("#noteSubmit").textContent="Save";$("#cancelEdit").classList.add("hidden")};
+$("#notesList").addEventListener("click",e=>{const btn=e.target.closest("button[data-action]");if(!btn)return;const id=btn.dataset.id,n=notes.find(x=>x.id===id);if(!n)return;if(btn.dataset.action==="edit"){editingNoteId=id;$("#noteTitle").value=n.title||"";$("#noteBody").value=n.body||"";$("#noteSubmit").textContent="Update";$("#cancelEdit").classList.remove("hidden");$("#noteTitle").focus();window.scrollTo({top:0,behavior:"smooth"})}else if(btn.dataset.action==="delete"){if(!confirm("Delete this note?"))return;const i=notes.findIndex(x=>x.id===id);if(i>=0)notes.splice(i,1);if(editingNoteId===id){editingNoteId=null;$("#noteForm").reset();$("#noteSubmit").textContent="Save";$("#cancelEdit").classList.add("hidden")};localStorage.setItem("nyx_notes",JSON.stringify(notes));renderNotes()}});
 $("#settingsBtn").onclick=()=>state.setup?show("#settingsView"):show("#setupView");
 $("#saveName").onclick=()=>{state.displayName=$("#displayName").value.trim()||"Notes";save();$("#visibleTitle").textContent=state.displayName;show("#notesView")};
 $("#vaultSettingsBtn").onclick=async()=>{
@@ -169,7 +174,7 @@ $("#importBtn").onclick=()=>show("#pickerView");
 async function syncUploads(){try{if(Native) await Native.syncUploads()}catch(e){}}
 async function ensureConcealPermission(){try{const st=await Native.getConcealStrategy();if(st?.api>=31&&st?.strategy===2&&!st?.manageMedia){show("#concealPermissionView");try{await Native.requestManageMedia()}catch(_){ }return true}}catch(_){ }return false}
 async function choosePicker(source){try{const r=await Native.pickMedia({source});if(r?.imported){const ids=Array.isArray(r.ids)?r.ids:[];if(ids.length)await ensureConcealPermission();for(const id of ids){try{await Native.concealMedia({id})}catch(_){}}await syncUploads();await renderVault();setTimeout(()=>show("#vaultView"),200)}}catch(e){}}
-$("#pickGallery").onclick=()=>choosePicker("gallery");$("#pickFiles").onclick=()=>choosePicker("files");$("#grantMediaManage").onclick=async()=>{try{const r=await Native.requestManageMedia();if(r?.granted){$("#concealPermissionMsg").textContent="Access granted.";show("#vaultView")}}catch(_){}};$("#skipMediaManage").onclick=()=>show("#vaultView");
+$("#pickPhotos").onclick=()=>choosePicker("photos");$("#pickFiles").onclick=()=>choosePicker("files");$("#grantMediaManage").onclick=async()=>{try{const r=await Native.requestManageMedia();if(r?.granted){$("#concealPermissionMsg").textContent="Access granted.";show("#vaultView")}}catch(_){}};$("#skipMediaManage").onclick=()=>show("#vaultView");
 let pressTimer=null,pressFiredLongPress=false,pressStartX=0,pressStartY=0;
 const LONGPRESS_MOVE_TOLERANCE=10; // px of finger drift still counted as a "hold", not a drag
 $("#vaultGrid").addEventListener("pointerdown",e=>{

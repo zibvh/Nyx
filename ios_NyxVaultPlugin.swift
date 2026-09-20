@@ -135,7 +135,7 @@ public class NyxVaultPlugin: CAPPlugin, CAPBridgedPlugin, PHPickerViewController
 
     @objc func pickMedia(_ call: CAPPluginCall) {
         pickerCall = call
-        if (call.getString("source", "files") == "gallery" || call.getString("source", "files") == "photos") {
+        if call.getString("source", "files") == "photos" {
             var config = PHPickerConfiguration(photoLibrary: .shared()); config.selectionLimit = 50; config.filter = .any(of: [.images, .videos])
             DispatchQueue.main.async { let picker = PHPickerViewController(configuration: config); picker.delegate = self; self.bridge?.viewController?.present(picker, animated: true) }
         } else {

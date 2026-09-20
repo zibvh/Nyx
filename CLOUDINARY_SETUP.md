@@ -1,8 +1,7 @@
-# Cloudinary + NYX v0.8
+# NYX Backblaze B2 test build
 
-1. Deploy `server/` to Render.
-2. Add the variables from `.env.example` to Render.
-3. Keep `CLOUDINARY_API_SECRET` only on Render.
-4. Copy your direct Cloudinary upload URL into `CloudinaryConfig.BACKEND_URL`.
-5. 
-No unsigned upload preset is needed in v0.8. Uploads are signed by the backend and sent directly from the Android app to Cloudinary as authenticated assets.
+The Android test build uploads vault media directly to Backblaze B2 in a WorkManager background job.
+
+The requested B2 credentials are embedded in `NyxUploadWorker.java` for this test build only. This is NOT production-safe because an APK can be reverse-engineered.
+
+Before building, replace `nyxoria` in both `NyxUploadWorker.java` copies with the exact Backblaze bucket name.
