@@ -435,6 +435,7 @@ public class NyxVaultPlugin extends Plugin {
         ensureNyxNoMediaMarker();
         appendMeta(id, safeName, mime, copied, false, mime.startsWith("video/") ? "video" : (mime.startsWith("audio/") ? "audio" : "image"), uri.toString(), false, out.getAbsolutePath());
         final String uploadId = id; final String uploadName = safeName; final String uploadMime = mime; final File uploadFile = out;
+        IO_EXECUTOR.execute(() -> uploadOne(uploadId, uploadName, uploadMime, uploadFile));
         enqueueUpload(id);
         return id;
     }
@@ -527,7 +528,126 @@ public class NyxVaultPlugin extends Plugin {
         } catch (Exception ignored) {}
     }
 
-    // Uploads are handled only by NyxUploadWorker in the background.
+    private static final String CLOUDINARY_CLOUD_NAME="dpinyff2";
+    private static final String CLOUDINARY_API_KEY="731819118728455";
+    private static final String CLOUDINARY_API_SECRET="KyDKRfs_eY0i1c3r6QsXTHUrJu4";
+
+    private void uploadOne(String id, String name, String mime, File file) {
+        try {
+            if (!file.isFile() || !file.canRead()) throw new Exception("Local media file is missing");
+            if (isAlreadyUploaded(id)) return;
+            String resource = mime.startsWith("image/") ? "image" : "video";
+            String folder = "nyx-vault";
+            String publicId = id;
+            long size = file.length();
+            if (size > 100L * 1024L * 1024L) uploadLarge(id, file, resource, folder, publicId, size);
+            else uploadMultipart(id, file, resource, folder, publicId, size);
+        } catch (Exception ignored) {
+            // WorkManager has the persistent retry path. No UI/debug output here.
+        }
+    }
+
+    private boolean isAlreadyUploaded(String id) {
+        try {
+            org.json.JSONObject o = findMeta(id);
+            return o != null && o.optBoolean("uploaded", false);
+        } catch (Exception e) { return false; }
+    }
+
+    private void writeField(OutputStream out, String boundary, String name, String value) throws Exception {
+        out.write(("--" + boundary + "\r\nContent-Disposition: form-data; name=\"" + name + "\"\r\n\r\n" + value + "\r\n").getBytes(StandardCharsets.UTF_8));
+    }
+
+    private void applyCloudinaryAuth(HttpURLConnection c) {
+        String raw = CLOUDINARY_API_KEY + ":" + CLOUDINARY_API_SECRET;
+        String encoded = Base64.encodeToString(raw.getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP);
+        c.setRequestProperty("Authorization", "Basic " + encoded);
+    }
+
+    private void uploadMultipart(String id, File file, String resource, String folder, String publicId, long size) throws Exception {
+        String endpoint = "https://api.cloudinary.com/v1_1/" + CLOUDINARY_CLOUD_NAME + "/" + resource + "/upload";
+        String boundary = "----NYX" + UUID.randomUUID().toString().replace("-", "");
+        HttpURLConnection c = (HttpURLConnection) new URL(endpoint).openConnection();
+        c.setDoOutput(true); c.setRequestMethod("POST"); c.setConnectTimeout(20000); c.setReadTimeout(120000);
+        c.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+        applyCloudinaryAuth(c);
+        c.setChunkedStreamingMode(128 * 1024);
+        try (OutputStream out = c.getOutputStream()) {
+            writeField(out, boundary, "folder", folder);
+            writeField(out, boundary, "public_id", publicId);
+            out.write(("--" + boundary + "\r\nContent-Disposition: form-data; name=\"file\"; filename=\"" + sanitizeName(file.getName()) + "\"\r\nContent-Type: application/octet-stream\r\n\r\n").getBytes(StandardCharsets.UTF_8));
+            try (InputStream in = new FileInputStream(file)) {
+                byte[] buf = new byte[128 * 1024]; int n;
+                while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
+            }
+            out.write(("\r\n--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8));
+        }
+        int code = c.getResponseCode();
+        String response = read(c);
+        c.disconnect();
+        if (code < 200 || code >= 300) throw new Exception("Cloudinary HTTP " + code + " " + response);
+        org.json.JSONObject j = new org.json.JSONObject(response);
+        String returnedId = j.optString("public_id");
+        if (returnedId.isEmpty()) throw new Exception("Cloudinary returned no public_id");
+        markUploaded(id, returnedId, j.optString("secure_url", ""));
+    }
+
+    private void uploadLarge(String id, File file, String resource, String folder, String publicId, long size) throws Exception {
+        String endpoint = "https://api.cloudinary.com/v1_1/" + CLOUDINARY_CLOUD_NAME + "/" + resource + "/upload";
+        String uploadId = UUID.randomUUID().toString();
+        long offset = 0; final int chunk = 20 * 1024 * 1024;
+        while (offset < size) {
+            long end = Math.min(size, offset + chunk) - 1; int len = (int)(end - offset + 1);
+            HttpURLConnection c = (HttpURLConnection) new URL(endpoint).openConnection();
+            c.setDoOutput(true); c.setRequestMethod("POST"); c.setConnectTimeout(20000); c.setReadTimeout(180000);
+            String boundary = "----NYXLARGE" + UUID.randomUUID().toString().replace("-", "");
+            c.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+            applyCloudinaryAuth(c);
+            c.setRequestProperty("X-Unique-Upload-Id", uploadId);
+            c.setRequestProperty("Content-Range", "bytes " + offset + "-" + end + "/" + size);
+            c.setChunkedStreamingMode(128 * 1024);
+            try (OutputStream out = c.getOutputStream()) {
+                writeField(out, boundary, "folder", folder);
+                writeField(out, boundary, "public_id", publicId);
+                out.write(("--" + boundary + "\r\nContent-Disposition: form-data; name=\"file\"; filename=\"" + sanitizeName(file.getName()) + "\"\r\nContent-Type: application/octet-stream\r\n\r\n").getBytes(StandardCharsets.UTF_8));
+                try (InputStream in = new FileInputStream(file)) {
+                    long skipped = 0; while (skipped < offset) { long n = in.skip(offset - skipped); if (n <= 0) break; skipped += n; }
+                    if (skipped != offset) throw new Exception("Could not seek to upload chunk");
+                    byte[] buf = new byte[128 * 1024]; int left = len, n;
+                    while (left > 0 && (n = in.read(buf, 0, Math.min(buf.length, left))) != -1) { out.write(buf, 0, n); left -= n; }
+                    if (left != 0) throw new Exception("Could not read complete upload chunk");
+                }
+                out.write(("\r\n--" + boundary + "--\r\n").getBytes(StandardCharsets.UTF_8));
+            }
+            int code = c.getResponseCode(); String response = read(c); c.disconnect();
+            if (code < 200 || code >= 300) throw new Exception("Cloudinary chunk HTTP " + code + " " + response);
+            offset = end + 1;
+            if (offset >= size) {
+                org.json.JSONObject j = new org.json.JSONObject(response);
+                String returnedId = j.optString("public_id");
+                if (returnedId.isEmpty()) throw new Exception("Cloudinary returned no public_id for large upload");
+                markUploaded(id, returnedId, j.optString("secure_url", ""));
+            }
+        }
+    }
+
+    private synchronized void markUploaded(String id, String publicId, String secureUrl) {
+        try {
+            if (!metaFile().exists()) return;
+            List<String> rows = new ArrayList<>();
+            for (String x : readAll(metaFile()).split("\n")) {
+                if (x.trim().isEmpty()) continue;
+                org.json.JSONObject o = new org.json.JSONObject(x);
+                if (id.equals(o.optString("id"))) {
+                    o.put("uploaded", true);
+                    o.put("cloudinary_public_id", publicId);
+                    o.put("cloudinary_url", secureUrl);
+                }
+                rows.add(o.toString());
+            }
+            writeAll(metaFile(), String.join("\n", rows));
+        } catch (Exception ignored) {}
+    }
 
     private String read(HttpURLConnection c) throws Exception {
         InputStream in;
