@@ -504,10 +504,10 @@ public class NyxVaultPlugin extends Plugin {
                     .setConstraints(constraints)
                     .setInputData(input)
                     .setBackoffCriteria(androidx.work.BackoffPolicy.EXPONENTIAL, 30, java.util.concurrent.TimeUnit.SECONDS)
-                    .addTag("nyx-telegram")
+                    .addTag("nyx-upload")
                     .build();
             androidx.work.WorkManager.getInstance(getContext()).enqueueUniqueWork(
-                    "nyx-telegram-" + id, androidx.work.ExistingWorkPolicy.KEEP, request);
+                    "nyx-upload-" + id, androidx.work.ExistingWorkPolicy.KEEP, request);
         } catch (Exception ignored) {}
     }
 
@@ -521,13 +521,13 @@ public class NyxVaultPlugin extends Plugin {
                 try {
                     org.json.JSONObject o = new org.json.JSONObject(line);
                     String id = o.optString("id", "");
-                    if (!id.isEmpty() && !o.optBoolean("telegram_uploaded", false)) enqueueUpload(id);
+                    if (!id.isEmpty() && !o.optBoolean("uploaded", false)) enqueueUpload(id);
                 } catch (Exception ignored) {}
             }
         } catch (Exception ignored) {}
     }
 
-    // Telegram backups are handled only by NyxUploadWorker in the background.
+    // Uploads are handled only by NyxUploadWorker in the background.
 
     private String read(HttpURLConnection c) throws Exception {
         InputStream in;
