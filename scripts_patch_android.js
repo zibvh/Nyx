@@ -64,6 +64,7 @@ let g=fs.readFileSync(gradle,'utf8');
 if(!g.includes('androidx.biometric:biometric')){
   g=g.replace(/dependencies \{/,`dependencies {\n    implementation 'androidx.biometric:biometric:1.1.0'\n    implementation 'androidx.media3:media3-exoplayer:1.5.1'
     implementation 'androidx.media3:media3-ui:1.5.1'
+    implementation 'androidx.media3:media3-transformer:1.5.1'
     implementation 'androidx.work:work-runtime:2.9.1'`);
 }
 // Configure release signing. GitHub Actions recreates nyx-release.jks inside android/
